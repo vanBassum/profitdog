@@ -208,7 +208,7 @@ a real match.
 | `PROFITDOG_PUBLIC_URL` | where a browser reaches this server; builds the OAuth redirect and the link URL |
 | `PROFITDOG_GOOGLE_CLIENT_ID` | OAuth client id |
 | `PROFITDOG_GOOGLE_CLIENT_SECRET` | OAuth client secret |
-| `PROFITDOG_ALLOWLIST` | who may create an account: `a@b.com,@example.com`. **Empty admits nobody** |
+| `PROFITDOG_ALLOWLIST` | who may create an account: `a@b.com,@example.com`, or `*` for anyone with a Google account. **Empty admits nobody** |
 | `PROFITDOG_OWNER_EMAIL` | the account that inherits everything written before accounts existed |
 | `PROFITDOG_COOKIE_SECURE` | `0` only for a local http:// server; a Secure cookie is never sent over http |
 | `PROFITDOG_AGENT_EXE` | the build served at `/download` |

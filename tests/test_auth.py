@@ -134,6 +134,34 @@ def test_a_whole_domain_can_be_allowed(tmp_path, db):
     assert user.email == "bas@koolecontrols.nl"
 
 
+def test_a_public_server_admits_anyone_who_signs_in(tmp_path, db):
+    """`*` is what an instance shared with whoever turns up sets.
+
+    It changes who is admitted, not how: everyone still arrives through
+    Google with a verified address.
+    """
+    config = settings_for(tmp_path, allowlist=("*",))
+
+    assert config.allows("a-stranger@example.com")
+    assert config.allows("someone@a-company.co.uk")
+
+    user = auth.upsert_google_user(
+        db, {"sub": "s", "email": "friend@gmail.com", "name": "Friend"}, config
+    )
+    assert user.email == "friend@gmail.com"
+
+
+def test_opening_the_door_is_never_something_that_happens_by_accident(tmp_path):
+    """The ways of getting it wrong all fail closed."""
+    for allowlist in ((), ("",), ("   ",), ("**",), ("all",), ("any",), ("%",)):
+        config = settings_for(tmp_path, allowlist=allowlist)
+        assert not config.allows("stranger@example.com"), allowlist
+
+    # And an address is still an address next to the wildcard, not a prefix.
+    config = settings_for(tmp_path, allowlist=("invited@example.com",))
+    assert not config.allows("invited@example.com.evil.test")
+
+
 def test_an_existing_user_is_not_re_checked_against_the_allowlist(tmp_path, db):
     """Editing an environment variable must not take somebody's history away."""
     config = settings_for(tmp_path, allowlist=("invited@example.com",))

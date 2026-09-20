@@ -85,7 +85,8 @@ class Settings:
     google_client_secret: str = ""
     #: Addresses allowed to create an account. Empty means nobody new: a
     #: closed door is the safe default for a server on the public internet,
-    #: and opening it is one environment variable.
+    #: and opening it is one environment variable. `*` opens it to anyone
+    #: with a Google account, which is what a public instance sets.
     allowlist: tuple[str, ...] = ()
     #: The account that inherits everything written before there were accounts.
     owner_email: str = ""
@@ -113,6 +114,16 @@ class Settings:
     def allows(self, email: str) -> bool:
         """Whether this address may create an account.
 
+        Three kinds of rule. An address admits one person, `@example.com`
+        admits everyone in a domain, and `*` admits anyone who can sign in
+        with Google -- an open server, which is a thing some instances want to
+        be and which has to be asked for in those words. It is never the
+        default and never what an empty or misspelt list falls back to: empty
+        still admits nobody.
+
+        Everyone still signs in with Google and still arrives with a verified
+        address. `*` changes who is admitted, not how they are identified.
+
         Existing users are not checked against this: taking someone's account
         away by editing an environment variable would be a surprising way to
         lose a history, and revocation is a separate concern from admission.
@@ -124,6 +135,9 @@ class Settings:
             rule = entry.strip().lower()
             if not rule:
                 continue
+            # The open door, asked for by name.
+            if rule == "*":
+                return True
             # A bare domain, written as `@example.com`, admits everyone in it.
             if rule.startswith("@"):
                 if address.endswith(rule):
