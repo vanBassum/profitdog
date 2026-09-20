@@ -95,6 +95,11 @@ class Settings:
     cookie_secure: bool = True
     #: The agent build handed out at /download.
     agent_exe: Path = REPO_ROOT / "agent" / "dist" / "profitdog.exe"
+    #: Where the published agent builds live. The server image carries no
+    #: EXE -- the agent is frozen on a Windows runner and released on GitHub
+    #: -- so a hosted instance sends people there rather than telling them to
+    #: build one, which is advice for a developer and not for a player.
+    releases_url: str = "https://github.com/vanBassum/profitdog/releases/latest"
 
     @property
     def auth_configured(self) -> bool:
@@ -157,4 +162,8 @@ class Settings:
                     "PROFITDOG_AGENT_EXE", REPO_ROOT / "agent" / "dist" / "profitdog.exe"
                 )
             ),
+            releases_url=os.environ.get(
+                "PROFITDOG_RELEASES_URL",
+                "https://github.com/vanBassum/profitdog/releases/latest",
+            ).strip(),
         )

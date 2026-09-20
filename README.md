@@ -212,6 +212,7 @@ a real match.
 | `PROFITDOG_OWNER_EMAIL` | the account that inherits everything written before accounts existed |
 | `PROFITDOG_COOKIE_SECURE` | `0` only for a local http:// server; a Secure cookie is never sent over http |
 | `PROFITDOG_AGENT_EXE` | the build served at `/download` |
+| `PROFITDOG_RELEASES_URL` | where `/download` sends people when the server carries no build; defaults to this repo's latest GitHub release |
 
 Register `{PROFITDOG_PUBLIC_URL}/auth/callback` as the authorized redirect URI
 in the Google Cloud console.

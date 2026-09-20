@@ -140,25 +140,70 @@ def link_prompt_page(*, error: str | None = None) -> str:
     )
 
 
-def download_page(*, available: bool) -> str:
-    if not available:
-        return _page(
-            "Download the agent",
-            "<h1>No agent build on this server</h1>"
-            "<p>Build it with <code>python -m PyInstaller profitdog.spec</code>, "
-            "or point <code>PROFITDOG_AGENT_EXE</code> at one.</p>"
-            "<a class=\"btn secondary\" href=\"/\">Open profitdog</a>",
-        )
-    return _page(
-        "Download the agent",
-        "<h1>Set up a gaming PC</h1>"
+def download_page(*, available: bool, releases_url: str) -> str:
+    """The setup page: where the agent comes from, and what to do with it.
+
+    Two ways to get the same program. A server that has a build beside it
+    serves those bytes; a hosted one has none -- the agent is frozen on a
+    Windows runner and published on GitHub -- and sends people to the
+    releases instead. Both paths are shown whenever both work, because a
+    download that is one hop from the source is easier to trust than one
+    that appears out of a server you happen to be signed in to.
+    """
+    releases = html.escape(releases_url or "", quote=True)
+    steps = (
         "<ol>"
         "<li>Download the agent and run it on the PC you play on.</li>"
         "<li>It shows a code and opens this site in your browser.</li>"
         "<li>Sign in, approve the code, and it starts sending matches here.</li>"
         "</ol>"
+    )
+    have_code = "<a class=\"btn secondary\" href=\"/link\">I already have a code</a>"
+
+    if not available:
+        # Not an error. This is the normal shape of a hosted instance: the
+        # image has no EXE in it, and the release is where the EXE is.
+        body = (
+            "<h1>Set up a gaming PC</h1>"
+            "<p>profitdog only sees your matches once the agent is running on "
+            "the PC you play on. Nothing is tracked until then.</p>" + steps
+        )
+        if releases:
+            body += (
+                "<a class=\"btn\" href=\"" + releases + "\" target=\"_blank\" "
+                "rel=\"noreferrer noopener\">Get profitdog.exe from Releases</a>"
+                + have_code +
+                "<p class=\"muted\" style=\"margin-top:16px\">Grab "
+                "<code>profitdog.exe</code> from the latest release. The same "
+                "build works for everyone; it belongs to your account only "
+                "once you approve it.</p>"
+            )
+        else:
+            body += (
+                "<p class=\"err\">This server has no agent build and no "
+                "releases URL. Build one with <code>python -m PyInstaller "
+                "agent.spec</code>, or point "
+                "<code>PROFITDOG_AGENT_EXE</code> or "
+                "<code>PROFITDOG_RELEASES_URL</code> at one.</p>"
+                + have_code
+            )
+        return _page("Download the agent", body)
+
+    release_link = (
+        "<p class=\"muted\" style=\"margin-top:16px\">Or take it from "
+        "<a href=\"" + releases + "\" target=\"_blank\" "
+        "rel=\"noreferrer noopener\">GitHub Releases</a>, where every build "
+        "is published.</p>"
+        if releases else ""
+    )
+    return _page(
+        "Download the agent",
+        "<h1>Set up a gaming PC</h1>"
+        "<p>profitdog only sees your matches once the agent is running on the "
+        "PC you play on. Nothing is tracked until then.</p>" + steps +
         "<a class=\"btn\" href=\"/download/profitdog.exe\">Download for Windows</a>"
-        "<a class=\"btn secondary\" href=\"/link\">I already have a code</a>"
+        + have_code +
         "<p class=\"muted\" style=\"margin-top:16px\">The same build works for "
-        "everyone; it belongs to your account only once you approve it.</p>",
+        "everyone; it belongs to your account only once you approve it.</p>"
+        + release_link,
     )

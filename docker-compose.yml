@@ -61,6 +61,8 @@ services:
       # localhost, and a Secure cookie is never sent back over http — sign-in
       # would appear to work and then silently not. Set it to 1 behind TLS.
       PROFITDOG_COOKIE_SECURE: ${PROFITDOG_COOKIE_SECURE:-0}
+      # Where /download points when no agent build is mounted below.
+      PROFITDOG_RELEASES_URL: ${PROFITDOG_RELEASES_URL:-https://github.com/vanBassum/profitdog/releases/latest}
     ports:
       - "${PROFITDOG_PORT:-5174}:5174"
     volumes:

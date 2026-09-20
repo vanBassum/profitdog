@@ -141,8 +141,17 @@ export function SessionPage({ matchKey, backHref, live }: Props) {
   if (!session || session.points.length === 0 || !detail) {
     return (
       <Empty>
-        Nothing recorded yet. Start the agent on your gaming PC and join a
-        server, and the curve appears here.
+        Nothing recorded yet. profitdog only sees your matches once the agent is
+        running on the PC you play on —{" "}
+        {/* Plain anchor: /download is server-rendered and outside the
+            browser router, so intercepting the click would 404 in-page. */}
+        <a
+          href="/download"
+          className="font-medium text-foreground underline underline-offset-4"
+        >
+          download it here
+        </a>
+        , run it, and join a server. The curve appears here.
       </Empty>
     )
   }

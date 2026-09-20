@@ -405,3 +405,63 @@ def test_downsample_output_is_still_in_time_order():
     rows = [(i * 2.0, (i * 91) % 700, 1) for i in range(3000)]
     out = downsample(rows, 120)
     assert [p["t"] for p in out] == sorted(p["t"] for p in out)
+
+
+# ---------------------------------------------------------------------------
+# The download page
+# ---------------------------------------------------------------------------
+
+
+def _download_client(tmp_path, db, accounts, *, exe: bool, releases: str):
+    settings = Settings(
+        database_url=TEST_DATABASE_URL,
+        ui_dist=tmp_path / "no-ui",
+        host="127.0.0.1",
+        port=0,
+        collector=False,
+        agent_exe=tmp_path / "profitdog.exe",
+        releases_url=releases,
+    )
+    if exe:
+        settings.agent_exe.write_bytes(b"MZ not really")
+    app = create_app(db=db, settings=settings)
+    account = accounts("downloader@example.com", agent_id="agent-download")
+    test_client = TestClient(app)
+    test_client.cookies.set(auth.SESSION_COOKIE, account.session)
+    return test_client
+
+
+RELEASES = "https://github.com/vanBassum/profitdog/releases/latest"
+
+
+def test_a_server_with_no_build_sends_you_to_the_releases(tmp_path, db, accounts):
+    """The hosted case. The image carries no EXE, and that is not an error.
+
+    Telling a player to run PyInstaller is telling them the page is broken.
+    """
+    with _download_client(tmp_path, db, accounts, exe=False, releases=RELEASES) as client:
+        body = client.get("/download").text
+
+    assert RELEASES in body
+    assert "PyInstaller" not in body
+    # Nothing to serve, so nothing may claim to: that link 404s.
+    assert "/download/profitdog.exe" not in body
+
+
+def test_a_server_with_a_build_serves_it_and_still_names_the_releases(
+    tmp_path, db, accounts
+):
+    with _download_client(tmp_path, db, accounts, exe=True, releases=RELEASES) as client:
+        body = client.get("/download").text
+
+    assert "/download/profitdog.exe" in body
+    assert RELEASES in body
+
+
+def test_the_download_page_is_behind_sign_in(tmp_path, db, accounts):
+    with _download_client(tmp_path, db, accounts, exe=False, releases=RELEASES) as client:
+        client.cookies.clear()
+        response = client.get("/download", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/login")

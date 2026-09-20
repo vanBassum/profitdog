@@ -4,6 +4,7 @@ import { AnalysisPage } from "@/components/analysis/AnalysisPage"
 import { HistoryPage } from "@/components/history/HistoryPage"
 import { SessionPage } from "@/components/SessionPage"
 import { NavTab } from "@/components/Nav"
+import { ThemeToggle } from "@/components/ThemeToggle"
 import { api, type MetricsResponse } from "@/lib/api"
 import {
   historyHref,
@@ -122,11 +123,25 @@ export function App() {
             </nav>
           </div>
 
-          <LivePill
-            status={live.status}
-            seq={live.seq}
-            updatedAt={live.updatedAt}
-          />
+          <div className="flex items-center gap-3">
+            <LivePill
+              status={live.status}
+              seq={live.seq}
+              updatedAt={live.updatedAt}
+            />
+            {/* Nothing arrives until the agent is running on the gaming PC,
+                and the agent is a release rather than part of this page. A
+                plain anchor: /download is server-rendered and outside the
+                browser router. */}
+            <a
+              href="/download"
+              className="rounded-md border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              title="Download the agent that sends matches here"
+            >
+              Get the agent
+            </a>
+            <ThemeToggle />
+          </div>
         </header>
 
         {page === "history" ? (

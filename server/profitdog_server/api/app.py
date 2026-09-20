@@ -906,7 +906,10 @@ def create_app(db: Database | None = None, settings: Settings | None = None) -> 
         if viewer(request) is None:
             return RedirectResponse("/login?next=%2Fdownload", status_code=303)
         return HTMLResponse(
-            pages.download_page(available=Path(settings.agent_exe).is_file())
+            pages.download_page(
+                available=Path(settings.agent_exe).is_file(),
+                releases_url=settings.releases_url,
+            )
         )
 
     @app.get("/download/profitdog.exe")
