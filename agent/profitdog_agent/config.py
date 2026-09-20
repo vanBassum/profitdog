@@ -27,6 +27,18 @@ IDLE_INTERVAL_SEC = 1.0
 #: How often the uplink tries to drain the outbox when it is healthy.
 UPLINK_INTERVAL_SEC = 2.0
 
+#: Where an agent looks when nobody has told it otherwise.
+#:
+#: The hosted instance, not localhost. This EXE is downloaded from a server and
+#: run by someone who has no reason to know a URL, and a default of
+#: 127.0.0.1:5174 sent them to whatever happened to be listening on their own
+#: machine -- which, for anyone running the stack locally, is a *different*
+#: profitdog that knows nothing about their account.
+#:
+#: Overridden by `--server` or `PROFITDOG_SERVER`, which is what development
+#: uses.
+DEFAULT_SERVER = "https://profitdog.vanbassum.com"
+
 
 @dataclass(frozen=True)
 class AgentSettings:
@@ -44,7 +56,7 @@ class AgentSettings:
             os.environ.get("PROFITDOG_AGENT_HOME", Path.home() / ".profitdog-agent")
         )
         return AgentSettings(
-            server=os.environ.get("PROFITDOG_SERVER", "http://127.0.0.1:5174"),
+            server=os.environ.get("PROFITDOG_SERVER", DEFAULT_SERVER),
             outbox=Path(os.environ.get("PROFITDOG_OUTBOX", home / "outbox.sqlite3")),
             label=os.environ.get("PROFITDOG_AGENT_LABEL") or os.environ.get("COMPUTERNAME"),
             interval=float(os.environ.get("PROFITDOG_POLL", POLL_INTERVAL_SEC)),

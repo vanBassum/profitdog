@@ -195,3 +195,33 @@ def test_linking_gives_up_rather_than_waiting_for_ever(tmp_path, server, monkeyp
             sleep=hurry,
         )
     assert store.load(server="http://testserver") is None
+
+# ---------------------------------------------------------------------------
+# Where the agent looks
+# ---------------------------------------------------------------------------
+
+
+def test_the_default_server_is_the_hosted_one_not_localhost():
+    """A downloaded EXE must not aim at the machine it is running on.
+
+    This defaulted to http://127.0.0.1:5174 for as long as profitdog was one
+    person's tracker, and it survived the move to a hosted service. The result
+    was an agent that asked the *local* machine for a linking code, printed a
+    localhost URL, and -- on a developer's box, where something was listening --
+    got a real code from a different profitdog that knew nothing about the
+    account they were signed into.
+    """
+    from profitdog_agent.config import DEFAULT_SERVER, AgentSettings
+
+    assert DEFAULT_SERVER.startswith("https://")
+    assert "127.0.0.1" not in DEFAULT_SERVER
+    assert "localhost" not in DEFAULT_SERVER
+    assert AgentSettings.from_env().server == DEFAULT_SERVER
+
+
+def test_the_default_is_overridable(monkeypatch):
+    """Development points it back at a local server, and must be able to."""
+    from profitdog_agent.config import AgentSettings
+
+    monkeypatch.setenv("PROFITDOG_SERVER", "http://127.0.0.1:5174")
+    assert AgentSettings.from_env().server == "http://127.0.0.1:5174"
