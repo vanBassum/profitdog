@@ -1,0 +1,118 @@
+# Every push and pull request: the whole suite, against a real PostgreSQL.
+#
+# There is no in-process database to fall back to, and that is the point. The
+# port to PostgreSQL turned up SQL that only worked because SQLite accepted it
+# — a bare column beside `MAX()`, a placeholder list built by joining the
+# characters of a string — and neither would have been caught by a suite
+# running on something more forgiving than production.
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A newer push makes an older run's answer irrelevant.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: server (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13"]
+
+    services:
+      postgres:
+        # Pinned to the major the production stack runs, so a version
+        # difference is a deliberate change rather than a surprise from
+        # whatever the runner image happens to ship.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: profitdog
+          POSTGRES_PASSWORD: profitdog
+          POSTGRES_DB: profitdog_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U profitdog -d profitdog_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PROFITDOG_TEST_DATABASE_URL: postgresql://profitdog:profitdog@127.0.0.1:5432/profitdog_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # Not `-r agent/requirements.txt`: steamworkspy exists to ship a
+          # Windows DLL and has no business on a Linux runner. msgpack is
+          # named on its own because the agent's map reader needs it and the
+          # suite imports that module; the tests that need the DLL itself skip
+          # themselves when it is absent.
+          pip install -r server/requirements.txt msgpack pytest
+
+      - name: Test
+        run: python -m pytest -q
+
+  ui:
+    name: ui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: ui
+        run: pnpm typecheck
+
+      - name: Build
+        working-directory: ui
+        run: pnpm build
+
+  image:
+    name: server image
+    runs-on: ubuntu-latest
+    # Built on every run so a broken Dockerfile fails here rather than at
+    # release time, but only pushed from master — see release.yml for tags.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

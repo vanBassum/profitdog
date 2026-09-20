@@ -12,16 +12,19 @@ under test, and a test-local ruleset exercises it completely.
 
 from __future__ import annotations
 
+import uuid
+
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from profitdog.server.db import open_database
-from profitdog.server.domain import rulesets
-from profitdog.server.domain.engine import derive_match
-from profitdog.server.domain.rulesets import v1
-from profitdog.server.importer import import_file, match_key_for_file
+from profitdog_server.db import open_database
+from profitdog_server.domain import rulesets
+from profitdog_server.domain.engine import derive_match
+from profitdog_server.domain.rulesets import v1
+from profitdog_server.importer import import_file, match_key_for_file
+from .conftest import TEST_DATABASE_URL
 from tests.test_domain_parity import EXPECTED, FIXTURES
 
 PATCH_DAY = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -141,12 +144,15 @@ def test_v1_is_always_available_and_is_the_default():
 
 
 @pytest.fixture()
-def imported_db(tmp_path):
-    db = open_database(tmp_path / "profitdog.sqlite3")
+def imported_db():
+    db = open_database(TEST_DATABASE_URL, schema="test_" + uuid.uuid4().hex[:16])
     for name in EXPECTED:
         import_file(db, FIXTURES / name)
-    yield db
-    db.close()
+    try:
+        yield db
+    finally:
+        db.drop_schema()
+        db.close()
 
 
 #: Sentinel for "leave this column alone", so that `build=None` can mean
@@ -160,16 +166,16 @@ def match_row(db, name, build=KEEP, started_at=KEEP):
         with db.write() as conn:
             if build is not KEEP:
                 conn.execute(
-                    "UPDATE matches SET build = ? WHERE match_key = ?", (build, key)
+                    "UPDATE matches SET build = %s WHERE match_key = %s", (build, key)
                 )
             if started_at is not KEEP:
                 conn.execute(
-                    "UPDATE matches SET started_at = ? WHERE match_key = ?",
+                    "UPDATE matches SET started_at = %s WHERE match_key = %s",
                     (started_at.isoformat(), key),
                 )
     return db.query_one(
         "SELECT id, match_key, started_at, ended_at, map, faction, build, closed"
-        " FROM matches WHERE match_key = ?",
+        " FROM matches WHERE match_key = %s",
         (key,),
     )
 

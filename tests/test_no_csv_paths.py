@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
+from .conftest import TEST_DATABASE_URL
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -37,7 +38,7 @@ ALLOWED = {
 }
 
 PY_ROOTS = ["profitdog", "tools"]
-TS_ROOT = REPO / "profitdog-ui" / "src"
+TS_ROOT = REPO / "ui" / "src"
 
 
 def source_files(root: Path, suffixes: tuple[str, ...]) -> list[Path]:
@@ -90,7 +91,7 @@ def test_no_runtime_python_imports_the_csv_modules():
 def test_the_deleted_programs_are_actually_deleted():
     for name in ("app.py", "tracker.py", "plot_graph.py"):
         assert not (REPO / name).exists(), f"{name} is still here"
-    assert not (REPO / "profitdog-ui" / "server.mjs").exists(), (
+    assert not (REPO / "ui" / "server.mjs").exists(), (
         "server.mjs still exists — it served CSVs and spawned the tracker"
     )
 
@@ -126,14 +127,14 @@ def test_no_typescript_parses_a_session_csv():
 
 def test_the_ui_talks_to_the_new_api_only():
     """Every endpoint the browser calls is one the server actually serves."""
-    from profitdog.server.api import create_app
-    from profitdog.server.config import Settings
+    from profitdog_server.api import create_app
+    from profitdog_server.config import Settings
     import tempfile
 
     tmp = Path(tempfile.mkdtemp())
     app = create_app(
         settings=Settings(
-            database=tmp / "t.sqlite3",
+            database_url=TEST_DATABASE_URL,
             ui_dist=tmp / "none",
             host="127.0.0.1",
             port=0,

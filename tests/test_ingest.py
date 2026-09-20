@@ -11,8 +11,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from profitdog.server.ingest import Ingestor
-from profitdog.server.segmentation import Segmenter
+from profitdog_server.ingest import Ingestor
+from profitdog_server.segmentation import Segmenter
 
 
 def counts(db) -> dict[str, int]:

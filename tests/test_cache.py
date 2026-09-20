@@ -13,28 +13,34 @@ accident.
 
 from __future__ import annotations
 
+import uuid
+
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from profitdog.server.db import open_database
-from profitdog.server.domain import rulesets
-from profitdog.server.domain.analysis import analyse
-from profitdog.server.domain.cache import MatchCache, drop, input_hash, stats
-from profitdog.server.domain.engine import MATCH_COLUMNS, derive_all
-from profitdog.server.domain.history import Filters, build_buckets, filter_matches, totals_of
-from profitdog.server.importer import import_file
+from profitdog_server.db import open_database
+from profitdog_server.domain import rulesets
+from profitdog_server.domain.analysis import analyse
+from profitdog_server.domain.cache import MatchCache, drop, input_hash, stats
+from profitdog_server.domain.engine import MATCH_COLUMNS, derive_all
+from profitdog_server.domain.history import Filters, build_buckets, filter_matches, totals_of
+from profitdog_server.importer import import_file
+from .conftest import TEST_DATABASE_URL
 from tests.test_domain_parity import EXPECTED, FIXTURES
 
 
 @pytest.fixture()
-def loaded(tmp_path):
-    db = open_database(tmp_path / "profitdog.sqlite3")
+def loaded():
+    db = open_database(TEST_DATABASE_URL, schema="test_" + uuid.uuid4().hex[:16])
     for name in EXPECTED:
         import_file(db, FIXTURES / name)
-    yield db
-    db.close()
+    try:
+        yield db
+    finally:
+        db.drop_schema()
+        db.close()
 
 
 def rows_of(db):
@@ -110,14 +116,19 @@ def test_a_new_sample_invalidates_the_match_that_gained_it(loaded):
     before = {v.match_key: v.profit for v in cache.derive_all(rows)}
 
     target = rows[0]
+    # `SELECT MAX(elapsed_sec), cash` with no GROUP BY used to work here, on
+    # a SQLite extension where a bare column beside MAX() comes from the
+    # winning row. PostgreSQL rejects it, and rightly: in standard SQL that
+    # query does not name which row the `cash` should come from.
     last = loaded.query_one(
-        "SELECT MAX(elapsed_sec) AS t, cash FROM cash_samples WHERE match_id = ?",
+        "SELECT elapsed_sec AS t, cash FROM cash_samples WHERE match_id = %s"
+        " ORDER BY elapsed_sec DESC LIMIT 1",
         (int(target["id"]),),
     )
     with loaded.write() as conn:
         conn.execute(
             "INSERT INTO cash_samples (match_id, elapsed_sec, cash, life,"
-            " observed_at, received_at, ingested_at) VALUES (?, ?, ?, 1, 't', 't', 't')",
+            " observed_at, received_at, ingested_at) VALUES (%s, %s, %s, 1, 't', 't', 't')",
             (int(target["id"]), float(last["t"]) + 2.0, int(last["cash"]) + 777),
         )
 
@@ -140,7 +151,7 @@ def test_a_correction_invalidates_its_match(loaded):
     with loaded.write() as conn:
         conn.execute(
             "INSERT INTO overrides (scope, match_id, life_number, value, created_at)"
-            " VALUES ('life_kit_cost', ?, 1, 1.0, 't')",
+            " VALUES ('life_kit_cost', %s, 1, 1.0, 't')",
             (int(target["id"]),),
         )
 

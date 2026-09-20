@@ -1,10 +1,16 @@
-"""The database: migrations, WAL, one writer, and surviving a kill -9.
+"""The database: migrations, integrity, one writer, and surviving a kill -9.
 
 Crash recovery is tested by actually killing a process mid-write rather than by
-simulating one. A rolled-back transaction in the same process exercises
-SQLite's Python bindings; `os._exit` mid-transaction exercises what happens
-when Windows takes the process away with the write-ahead log half written,
-which is the case that actually occurs.
+simulating one. A rolled-back transaction in the same process exercises the
+driver; `os._exit` mid-transaction exercises what happens when the machine
+takes the server away with a transaction open, which is the case that actually
+occurs.
+
+On PostgreSQL that case is, if anything, more interesting than it was on
+SQLite: the data now outlives the process entirely, so what is being asserted
+is that the *server* dying leaves the *database* with a whole batch or none of
+it -- and that the connection's death is what rolls it back, with nothing to
+replay and nobody to run a recovery step.
 """
 
 from __future__ import annotations
@@ -13,12 +19,14 @@ import json
 import subprocess
 import sys
 import textwrap
+import uuid
 from pathlib import Path
 
 import pytest
 
-from profitdog.server.db import LATEST_VERSION, open_database
-from profitdog.server.db.schema import MIGRATIONS, current_version
+from profitdog_server.db import LATEST_VERSION, open_database
+from profitdog_server.db.schema import MIGRATIONS, current_version
+from .conftest import TEST_DATABASE_URL
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -30,22 +38,42 @@ def test_migrations_are_numbered_once_and_in_order():
     assert numbers[0] == 1
 
 
-def test_opening_twice_is_idempotent(tmp_path):
-    path = tmp_path / "w.sqlite3"
-    first = open_database(path)
+def test_opening_twice_is_idempotent():
+    """Migrating an already-migrated database must do nothing at all."""
+    name = "test_" + uuid.uuid4().hex[:16]
+    first = open_database(TEST_DATABASE_URL, schema=name)
     assert first.schema_version == LATEST_VERSION
     first.close()
 
-    second = open_database(path)
-    assert second.schema_version == LATEST_VERSION
-    applied = second.query("SELECT version FROM schema_migrations ORDER BY version")
-    assert [r["version"] for r in applied] == [n for n, _ in MIGRATIONS]
-    second.close()
+    second = open_database(TEST_DATABASE_URL, schema=name)
+    try:
+        assert second.schema_version == LATEST_VERSION
+        applied = second.query(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        )
+        assert [r["version"] for r in applied] == [n for n, _ in MIGRATIONS]
+    finally:
+        second.drop_schema()
+        second.close()
 
 
-def test_wal_and_foreign_keys_are_on(db):
-    assert db.scalar("PRAGMA journal_mode") == "wal"
-    assert db.scalar("PRAGMA foreign_keys") == 1
+def test_the_database_is_the_one_we_think_it_is(db):
+    """No pragmas to check any more, so check what they used to guarantee.
+
+    Under SQLite this asserted `journal_mode=wal` and `foreign_keys=1`, both of
+    which were per-connection settings that could silently be off. PostgreSQL
+    has no equivalent switch -- durability and referential integrity are not
+    optional -- so what is worth pinning instead is that the connection really
+    is PostgreSQL, and that the schema landed where this Database was told to
+    put it rather than leaking into `public`.
+    """
+    assert "PostgreSQL" in db.scalar("SELECT version()")
+    assert db.scalar("SELECT current_schema()") == db.schema
+    tables = db.query(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+        (db.schema,),
+    )
+    assert "matches" in {r["table_name"] for r in tables}
 
 
 def test_a_reader_sees_committed_writes_and_not_uncommitted_ones(db):
@@ -108,9 +136,10 @@ def test_trimming_events_leaves_the_newest(db):
 
 
 def test_foreign_keys_actually_bite(db):
-    import sqlite3
+    """A sample must point at a match that exists."""
+    import psycopg
 
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
         with db.write() as conn:
             conn.execute(
                 "INSERT INTO cash_samples (match_id, elapsed_sec, cash, life,"
@@ -130,12 +159,13 @@ CRASH_SCRIPT = textwrap.dedent(
     """
     import os, sys
     from datetime import datetime, timedelta, timezone
-    sys.path.insert(0, "__REPO__")
-    from profitdog.server.db import open_database
-    from profitdog.protocol import Fact, FactBatch
-    from profitdog.server.ingest import Ingestor
+    for _root in ("__REPO__/server", "__REPO__/protocol"):
+        sys.path.insert(0, _root)
+    from profitdog_server.db import open_database
+    from profitdog_protocol import Fact, FactBatch
+    from profitdog_server.ingest import Ingestor
 
-    db = open_database("__PATH__")
+    db = open_database("__URL__", schema="__SCHEMA__")
     ing = Ingestor(db)
     base = datetime(2026, 9, 19, 20, 0, tzinfo=timezone.utc)
 
@@ -157,7 +187,7 @@ CRASH_SCRIPT = textwrap.dedent(
     print(str(db.latest_seq()) + "|" + str(ing.cursor_for("crash-agent")), flush=True)
 
     # Die in the middle of the next batch, with the transaction still open.
-    import profitdog.server.segmentation as seg
+    import profitdog_server.segmentation as seg
     original = seg.Segmenter.feed
     calls = [0]
     def feed(self, *a, **k):
@@ -171,18 +201,28 @@ CRASH_SCRIPT = textwrap.dedent(
 )
 
 
-def test_a_kill_mid_batch_leaves_a_consistent_database(tmp_path):
-    path = tmp_path / "crash.sqlite3"
-    script = CRASH_SCRIPT.replace(
-        "__REPO__", str(REPO).replace("\\", "/")
-    ).replace("__PATH__", str(path).replace("\\", "/"))
+def test_a_kill_mid_batch_leaves_a_consistent_database():
+    """Kill the server mid-batch; the database must hold all of it or none.
+
+    The child writes one whole batch, reports where it got to, then dies with
+    `os._exit` in the middle of the next one -- no `finally`, no rollback, no
+    close. PostgreSQL notices the connection has gone and discards the open
+    transaction, which is the behaviour being asserted: nothing half-written
+    survives, and no published event refers to a fact that does not exist.
+    """
+    name = "test_" + uuid.uuid4().hex[:16]
+    script = (
+        CRASH_SCRIPT.replace("__REPO__", str(REPO).replace("\\", "/"))
+        .replace("__URL__", TEST_DATABASE_URL)
+        .replace("__SCHEMA__", name)
+    )
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=180
     )
     assert result.returncode == 9, result.stderr
     before_seq, before_cursor = result.stdout.strip().split("|")
 
-    db = open_database(path)
+    db = open_database(TEST_DATABASE_URL, schema=name)
     try:
         # WAL replayed, schema intact, and the committed batch is all there.
         assert db.schema_version == LATEST_VERSION
@@ -195,7 +235,7 @@ def test_a_kill_mid_batch_leaves_a_consistent_database(tmp_path):
         # samples from it, no events announcing samples that do not exist.
         assert (
             db.scalar(
-                "SELECT COUNT(*) FROM ingested_envelopes WHERE agent_seq > ?",
+                "SELECT COUNT(*) FROM ingested_envelopes WHERE agent_seq > %s",
                 (int(before_cursor),),
             )
             == 0
@@ -212,6 +252,7 @@ def test_a_kill_mid_batch_leaves_a_consistent_database(tmp_path):
                 "an event survived the crash without its fact"
             )
     finally:
+        db.drop_schema()
         db.close()
 
 
@@ -223,7 +264,7 @@ def test_an_agent_resends_what_the_crash_took(tmp_path):
     gaming PC waiting to be sent again — which is the entire reason the ack is
     the highest *contiguous* sequence rather than the highest seen.
     """
-    from profitdog.agent.outbox import Outbox
+    from profitdog_agent.outbox import Outbox
 
     with Outbox(tmp_path / "outbox.sqlite3", boot_id="b1") as box:
         for i in range(120):

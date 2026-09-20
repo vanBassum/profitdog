@@ -15,12 +15,13 @@ Both can run on the same machine. Nothing in the protocol assumes it.
 ## Architecture
 
 ```text
-  GAMING PC                                SERVER (here, or anywhere)
-  ─────────                                ──────────────────────────
+  GAMING PC                                SERVER (hosted)
+  ─────────                                ───────────────
   Rich Presence ─┐
-  breadcrumbs   ─┼─► collector ─► outbox ──HTTP──► ingest ─► SQLite (facts)
-  save file     ─┘               (SQLite,           │             │
-                                  durable)          │        segmentation
+  breadcrumbs   ─┼─► collector ─► outbox ──HTTP──► ingest ─► PostgreSQL
+  save file     ─┘               (SQLite,           │        (facts)
+                                  durable)          │             │
+                                                    │        segmentation
                                                     │             │
                                               api_events     domain rules
                                               (published)     (versioned,
@@ -29,6 +30,32 @@ Both can run on the same machine. Nothing in the protocol assumes it.
   browser  ◄────── WebSocket deltas ────────────────┘             │
            ◄────── REST snapshots ──────────────────────────────────┘
 ```
+
+### Three apps, and the contract between them
+
+```text
+  agent/      the Windows agent            → dist/profitdog.exe
+  server/     the API, the UI, sign-in     → ghcr.io/vanbassum/profitdog-server
+  ui/         the React app                → built into the server image
+  protocol/   the wire contract both halves speak
+```
+
+`agent/` and `server/` do not import each other — the only edge between them is
+`protocol/`, and `tests/test_no_csv_paths.py` keeps it that way. That is what
+makes the agent shippable to a machine that has never heard of PostgreSQL, and
+the server deployable without a Windows DLL in the image.
+
+### Two databases, on purpose
+
+**PostgreSQL** holds everything on the server: facts, accounts, sessions,
+linking codes, the published log. It is a hosted multi-user service now, and
+its data has to outlive the container, back up without stopping writers, and
+not care that the process restarted.
+
+**SQLite** is still the agent's outbox, and should stay that way. That is a
+single-writer queue on one gaming PC with no server in sight — exactly the
+shape SQLite is best at, and a PC that cannot reach the network must still be
+able to record a match. Nothing under `agent/` imports a database driver.
 
 ### The agent reports; it does not conclude
 
@@ -121,24 +148,137 @@ nothing local publishes one). No migration, no rewrite of history.
 To add one: copy `v1.py` to `v2.py`, change what the patch changed, register it
 with the builds it covers and the date it landed. Do not edit `v1.py`.
 
+## Accounts
+
+One server, several people, and nobody sees anybody else's play.
+
+Identity is Google's, over OpenID Connect, entirely server-side. The browser
+gets an HTTP-only session cookie; the agent gets something else entirely, and
+the two are never interchangeable:
+
+| | a person | a linked PC |
+| --- | --- | --- |
+| proves it with | session cookie | `Authorization: Bearer pdog_…` |
+| may | read and correct their own data | upload facts |
+| may not | upload | read anything at all |
+
+That asymmetry is the point. A gaming PC is the least defended machine in the
+system, and the credential it holds is a bearer token. The worst a stolen one
+can do is write rubbish into the account it belongs to — it cannot read a
+history, and it cannot be traded for a session.
+
+**Google tokens never reach the agent.** The authorization code, the token
+exchange and the ID token live between the browser, the server and Google. The
+agent only ever sees a code it asked for and a credential it was handed.
+
+### Linking a PC
+
+The EXE is generic: the same bytes for everyone, carrying no account.
+
+1. It asks the server for a short-lived code and prints it.
+2. It opens the server in the default browser.
+3. You sign in with Google and approve the code.
+4. It exchanges the code for an upload-only credential and stores it.
+
+The code lasts ten minutes, works once, and is bound to a device secret that
+only the asking PC holds — so reading a code over someone's shoulder is not
+enough to collect the credential. On Windows the credential is sealed with
+DPAPI against your login, so the file is useless on another account or another
+machine.
+
+`--relink` forgets the stored credential and starts again. A credential is
+revoked by setting `revoked_at` on its `agent_credentials` row, which takes
+effect on that agent's very next upload.
+
+### Ownership
+
+`agents`, `matches` and `api_events` carry a `user_id`. The facts themselves do
+not: each hangs off a match or an agent that has one, and a second copy of the
+answer is a second place for it to be wrong.
+
+Every read is scoped at the query, not filtered afterwards — `all_matches()`
+takes an account and has no unscoped form, so a route cannot forget. Another
+account's match is a **404, not a 403**: a 403 would confirm that the key names
+a real match.
+
+### Configuration
+
+| | |
+| --- | --- |
+| `PROFITDOG_PUBLIC_URL` | where a browser reaches this server; builds the OAuth redirect and the link URL |
+| `PROFITDOG_GOOGLE_CLIENT_ID` | OAuth client id |
+| `PROFITDOG_GOOGLE_CLIENT_SECRET` | OAuth client secret |
+| `PROFITDOG_ALLOWLIST` | who may create an account: `a@b.com,@example.com`. **Empty admits nobody** |
+| `PROFITDOG_OWNER_EMAIL` | the account that inherits everything written before accounts existed |
+| `PROFITDOG_COOKIE_SECURE` | `0` only for a local http:// server; a Secure cookie is never sent over http |
+| `PROFITDOG_AGENT_EXE` | the build served at `/download` |
+
+Register `{PROFITDOG_PUBLIC_URL}/auth/callback` as the authorized redirect URI
+in the Google Cloud console.
+
+HTTPS is assumed. Cookies are `Secure` and `HttpOnly`, `SameSite=Lax` so the
+Google callback works while cross-site POSTs still do not.
+
+The allowlist admits *new* accounts only. Removing an address does not take an
+existing account away — losing a history to an environment variable would be a
+surprising way to be revoked, and revocation is a separate concern from
+admission.
+
+### Inheriting the single-user database
+
+Rows written before any of this carry `user_id IS NULL`, which means "from
+before the question was asked" and never "public". On startup the address in
+`PROFITDOG_OWNER_EMAIL` gets a `users` row and adopts all of them. That account
+has no Google subject until the first sign-in whose **verified** address matches
+claims it — which is why `email_verified` is insisted upon, and the only time an
+address rather than a subject decides an account.
+
+It runs every startup and is idempotent, so the CSV importer can keep writing
+ownerless history and it will be adopted next time the server starts.
+
 ## Running it
 
+The whole thing, including its database:
+
 ```bash
-pip install -r requirements.txt
-
-# once, to bring the CSV era in
-python -m profitdog.server.importer --from . --db profitdog.sqlite3
-
-# the server (serves the API and the built UI on http://127.0.0.1:5174)
-cd profitdog-ui && pnpm install && pnpm build && cd ..
-python -m profitdog.server
-
-# on the gaming PC
-python -m profitdog.agent --server http://127.0.0.1:5174
+cp .env.example .env          # then fill in the Google client
+docker compose up
 ```
 
-`python -m PyInstaller profitdog.spec` builds `dist/profitdog.exe` — the agent,
-frozen, for a machine with no Python on it.
+That serves http://127.0.0.1:5174. Without a Google client it still starts and
+says so on `/login`, which is the useful failure — everything else can be
+exercised.
+
+By hand, for development:
+
+```bash
+docker compose up -d postgres         # just the database
+pip install -r requirements-dev.txt
+
+cd ui && pnpm install && pnpm build && cd ..
+export PROFITDOG_DATABASE_URL=postgresql://profitdog:profitdog@127.0.0.1:55432/profitdog
+export PROFITDOG_PUBLIC_URL=http://127.0.0.1:5174
+export PROFITDOG_GOOGLE_CLIENT_ID=... PROFITDOG_GOOGLE_CLIENT_SECRET=...
+export PROFITDOG_ALLOWLIST=you@example.com
+export PROFITDOG_COOKIE_SECURE=0
+PYTHONPATH=server:protocol python -m profitdog_server
+
+# on the gaming PC: shows a code, opens a browser, links itself
+PYTHONPATH=agent:protocol python -m profitdog_agent --server http://127.0.0.1:5174
+```
+
+`PROFITDOG_COOKIE_SECURE=0` matters locally and only locally: a `Secure` cookie
+is never sent back over `http://`, so sign-in appears to succeed and then
+silently does not. Leave it on behind TLS.
+
+The `PYTHONPATH` is what a root `conftest.py` does for the tests and what the
+Dockerfile and the PyInstaller spec do for the deployed forms — three source
+roots, no install step.
+
+`cd agent && python -m PyInstaller agent.spec` builds `agent/dist/profitdog.exe`
+— the agent, frozen, for a machine with no Python on it. CI does this on a
+Windows runner for every tag and attaches it to the release; see
+`.github/workflows/release.yml`.
 
 ## The API
 
@@ -148,8 +288,10 @@ the domain racing the first one over the network.
 
 | | |
 | --- | --- |
-| `POST /api/agent/facts` | take delivery of a batch; returns the acknowledgement |
-| `GET /api/agent/cursor` | where the server is for one agent, so it can resume |
+| `POST /api/agent/facts` | *(agent)* take delivery of a batch; returns the acknowledgement |
+| `GET /api/agent/cursor` | *(agent)* where the server is for this agent, so it can resume |
+| `POST /api/agent/link/start` | *(open)* ask for a linking code |
+| `POST /api/agent/link/poll` | *(open)* wait for approval, then collect the credential once |
 | `GET /api/agents` | which agents have reported, and when |
 | `GET /api/health` | schema version, rulesets, sequence, counts, cache stats |
 | `GET /api/matches` | match summaries, period totals, what is available to filter by |
@@ -164,6 +306,13 @@ the domain racing the first one over the network.
 | `GET /api/stream/cursor` | the current sequence number |
 | `POST /api/maintenance/rebuild-cache` | throw the derived cache away |
 | `WS /api/live?since=N` | replay the gap after `N`, then live deltas |
+| `GET /api/me` | who the browser is signed in as |
+| `GET /login`, `/auth/login`, `/auth/callback`, `/auth/logout` | the Google round trip |
+| `GET /link`, `POST /link/approve` | approve a PC that is showing a code |
+| `GET /download`, `/download/profitdog.exe` | the agent build |
+
+Everything not marked *(agent)* or *(open)* needs a session, and answers for
+that account only. An agent credential is refused on all of them.
 
 Filters (`range`, `map`, `build`, `q`, `group`) mean the same thing on every
 endpoint because one predicate implements them.
@@ -187,7 +336,7 @@ bought anything. Derivation never sees a decimated curve.
 
 ## Performance
 
-`python -m profitdog.server.bench --hours 1000` generates a realistic synthetic
+`PYTHONPATH=server:protocol python -m profitdog_server.bench --hours 1000` generates a realistic synthetic
 load — kits bought in instalments, earnings in bursts, mid-life outgoings, money
 between lives, matches ending in the menu — and measures it. At 1,000 hours
 (1,351 matches, 7,429 lives, 1.36M facts, 288 MB):
@@ -211,9 +360,23 @@ every answer is identical with it dropped, cold and warm.
 ## Tests
 
 ```bash
-python -m pytest              # 109 tests
-cd profitdog-ui && pnpm build
+docker compose up -d postgres     # the suite needs a real one
+python -m pytest                  # 179 tests
+cd ui && pnpm typecheck && pnpm build
 ```
+
+**The tests run against PostgreSQL, and there is no fallback.** Every test gets
+its own schema (`CREATE SCHEMA test_...`), created and dropped in milliseconds,
+so they are isolated without a database each. `PROFITDOG_TEST_DATABASE_URL`
+points them somewhere else; with nothing to connect to, the run fails at
+collection with the command to start one rather than quietly testing something
+easier.
+
+That is not pedantry. The port off SQLite was caught by exactly this: a query
+selecting a bare column beside `MAX()` with no `GROUP BY`, which SQLite answers
+and PostgreSQL rejects, and a placeholder list built by joining the *characters*
+of a string — a bug that was invisible while the placeholder was one character
+long.
 
 The one worth knowing about is `tests/test_domain_parity.py`. Every per-life
 figure it asserts — kit costs, earnings, break-even times, correlations — was

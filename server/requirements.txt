@@ -1,0 +1,12 @@
+# The server: the HTTP and WebSocket surface, and the database behind it.
+fastapi
+uvicorn[standard]
+
+# PostgreSQL. The binary wheel so a deploy needs no libpq and no compiler;
+# swap for plain `psycopg` plus a system libpq if you would rather have one.
+psycopg[binary]
+
+# The one call the server makes outwards: trading an authorization code with
+# Google for tokens. Named explicitly rather than leaned on as a transitive
+# dependency of the test client, because the sign-in path needs it at runtime.
+httpx

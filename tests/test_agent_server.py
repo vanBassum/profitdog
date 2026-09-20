@@ -23,10 +23,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from profitdog.agent.outbox import Outbox
-from profitdog.agent.uplink import Uplink
-from profitdog.server.api import create_app
-from profitdog.server.config import Settings
+from profitdog_agent.outbox import Outbox
+from profitdog_agent.uplink import Uplink
+from profitdog_server import auth
+from profitdog_server.api import create_app
+from profitdog_server.config import Settings
+from .conftest import TEST_DATABASE_URL
 
 
 class Wire:
@@ -37,8 +39,12 @@ class Wire:
     replaced, so what is under test is the real delivery logic.
     """
 
-    def __init__(self, client: TestClient) -> None:
+    def __init__(self, client: TestClient, credential: str) -> None:
         self.client = client
+        # The credential the PC was given when it was linked. A real uplink
+        # sends this on every call; the wire does the same so these tests go
+        # through the same authorisation the live path does.
+        self.headers = {"authorization": "Bearer " + credential}
         self.up = True
         self.swallow_acks = False
         self.posts = 0
@@ -48,7 +54,7 @@ class Wire:
             if not self.up:
                 raise urllib.error.URLError("connection refused")
             self.posts += 1
-            response = self.client.post(path, json=payload)
+            response = self.client.post(path, json=payload, headers=self.headers)
             if response.status_code != 200:
                 raise urllib.error.HTTPError(path, response.status_code, "", {}, None)
             if self.swallow_acks:
@@ -59,7 +65,7 @@ class Wire:
         def get(path: str) -> dict:
             if not self.up:
                 raise urllib.error.URLError("connection refused")
-            response = self.client.get(path)
+            response = self.client.get(path, headers=self.headers)
             return response.json()
 
         uplink._post = post  # noqa: SLF001 - swapping the transport is the point
@@ -80,9 +86,9 @@ def attempt(uplink: Uplink) -> bool:
 
 
 @pytest.fixture()
-def wired(tmp_path, db):
+def wired(tmp_path, db, accounts):
     settings = Settings(
-        database=tmp_path / "unused.sqlite3",
+        database_url=TEST_DATABASE_URL,
         ui_dist=tmp_path / "no-ui",
         host="127.0.0.1",
         port=0,
@@ -91,8 +97,16 @@ def wired(tmp_path, db):
     app = create_app(db=db, settings=settings)
     with TestClient(app) as client:
         outbox = Outbox(tmp_path / "outbox.sqlite3", boot_id="boot-1")
+        # This PC belongs to somebody: the server will not take facts from an
+        # agent that was never linked.
+        account = accounts(
+            "player@example.com", agent_id=outbox.agent_id, label="gaming-pc"
+        )
+        # The same person, reading in a browser: the uploaded facts have to
+        # come back out through the API they own.
+        client.cookies.set(auth.SESSION_COOKIE, account.session)
         uplink = Uplink(outbox, "", label="gaming-pc")
-        wire = Wire(client)
+        wire = Wire(client, account.credential)
         wire.install(uplink)
         yield outbox, uplink, wire, db, client
         outbox.close()

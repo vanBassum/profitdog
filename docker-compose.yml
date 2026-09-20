@@ -1,0 +1,72 @@
+# profitdog: the server and the database it needs.
+#
+# Enough to run the whole thing on one machine — `docker compose up` gives a
+# working server on http://127.0.0.1:5174 — and enough to run the tests against
+# the same PostgreSQL the server uses, which is the point: the suite is not
+# allowed to fall back to something easier.
+#
+#     docker compose up -d postgres     # just the database, for the tests
+#     docker compose up                 # the whole thing
+#
+# Sign-in needs a Google client. Without one the server still starts and says
+# so on /login, which is the useful failure: everything else can be exercised.
+
+name: profitdog
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-profitdog}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-profitdog}
+      POSTGRES_DB: ${POSTGRES_DB:-profitdog}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Creates `profitdog_test` beside the real database, so
+      # `docker compose up -d postgres` is all the test suite needs. Runs only
+      # when the data directory is empty, which is how the entrypoint works.
+      - ./server/initdb:/docker-entrypoint-initdb.d:ro
+    ports:
+      # Published so the test suite can reach it from the host. 55432 rather
+      # than 5432 so it cannot collide with a PostgreSQL someone already runs.
+      - "${POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      # `pg_isready` alone returns true while the entrypoint is still running
+      # its init scripts and about to restart the server, so the dependent
+      # service can connect and then be disconnected. Asking the database a
+      # real question avoids that window.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -q && psql -U $$POSTGRES_USER -d $$POSTGRES_DB -c 'SELECT 1' -q"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PROFITDOG_DATABASE_URL: postgresql://${POSTGRES_USER:-profitdog}:${POSTGRES_PASSWORD:-profitdog}@postgres:5432/${POSTGRES_DB:-profitdog}
+      PROFITDOG_PUBLIC_URL: ${PROFITDOG_PUBLIC_URL:-http://127.0.0.1:5174}
+      PROFITDOG_GOOGLE_CLIENT_ID: ${PROFITDOG_GOOGLE_CLIENT_ID:-}
+      PROFITDOG_GOOGLE_CLIENT_SECRET: ${PROFITDOG_GOOGLE_CLIENT_SECRET:-}
+      PROFITDOG_ALLOWLIST: ${PROFITDOG_ALLOWLIST:-}
+      PROFITDOG_OWNER_EMAIL: ${PROFITDOG_OWNER_EMAIL:-}
+      # Off by default because this compose file serves plain http on
+      # localhost, and a Secure cookie is never sent back over http — sign-in
+      # would appear to work and then silently not. Set it to 1 behind TLS.
+      PROFITDOG_COOKIE_SECURE: ${PROFITDOG_COOKIE_SECURE:-0}
+    ports:
+      - "${PROFITDOG_PORT:-5174}:5174"
+    volumes:
+      # A built agent to hand out at /download, if there is one. Read-only:
+      # the server serves this file and has no reason to be able to change it.
+      - ./agent/dist:/app/agent:ro
+
+volumes:
+  postgres-data:

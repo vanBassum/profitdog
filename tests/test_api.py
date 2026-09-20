@@ -14,28 +14,54 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from profitdog.server.api import create_app
-from profitdog.server.config import Settings
-from profitdog.server.downsample import downsample
+from profitdog_server import auth
+from profitdog_server.api import create_app
+from profitdog_server.config import Settings
+from profitdog_server.downsample import downsample
+from .conftest import TEST_DATABASE_URL
 
 
 @pytest.fixture()
-def client(tmp_path, db):
+def client(tmp_path, db, accounts):
+    """A signed-in browser, with one linked PC behind it.
+
+    Every route below answers for an account now, so the client carries a
+    session cookie by default and `agent` is that account's own simulator.
+    Tests about *not* being signed in clear the cookie deliberately.
+    """
     settings = Settings(
-        database=tmp_path / "unused.sqlite3",
+        database_url=TEST_DATABASE_URL,
         ui_dist=tmp_path / "no-ui",
         host="127.0.0.1",
         port=0,
         collector=False,
     )
     app = create_app(db=db, settings=settings)
+    account = accounts("owner@example.com", agent_id="agent-test")
     with TestClient(app) as test_client:
         test_client.app_state = app.state
+        test_client.cookies.set(auth.SESSION_COOKIE, account.session)
+        test_client.account = account
         yield test_client
 
 
+@pytest.fixture()
+def agent(client):
+    """The simulator for the client's own linked PC.
+
+    Overrides the plain `agent` fixture from conftest: facts have to arrive
+    under the agent id the client's credential was issued for, or the server
+    refuses them -- which is the point of the credential.
+    """
+    return client.account.sim
+
+
 def post_facts(client, agent) -> dict:
-    response = client.post("/api/agent/facts", json=agent.drain().to_json())
+    response = client.post(
+        "/api/agent/facts",
+        json=agent.drain().to_json(),
+        headers=client.account.bearer,
+    )
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -58,13 +84,19 @@ def test_facts_are_accepted_and_acknowledged(client, agent):
     assert ack["duplicates"] == 0
     assert ack["acked_through"] > 0
 
-    cursor = client.get("/api/agent/cursor", params={"agent_id": agent.agent_id}).json()
+    # No agent_id parameter any more: the credential says which agent this is,
+    # so there is nothing to ask for and nothing to get wrong.
+    cursor = client.get("/api/agent/cursor", headers=client.account.bearer).json()
+    assert cursor["agent_id"] == agent.agent_id
     assert cursor["acked_through"] == ack["acked_through"]
 
 
 def test_a_malformed_batch_is_refused_rather_than_half_stored(client):
-    response = client.post("/api/agent/facts", json={"protocol": 99, "agent_id": "x",
-                                                     "boot_id": "y", "facts": []})
+    response = client.post(
+        "/api/agent/facts",
+        json={"protocol": 99, "agent_id": "x", "boot_id": "y", "facts": []},
+        headers=client.account.bearer,
+    )
     assert response.status_code == 400
     assert "protocol" in response.json()["detail"]
 
@@ -72,9 +104,11 @@ def test_a_malformed_batch_is_refused_rather_than_half_stored(client):
 def test_a_replayed_batch_changes_nothing(client, agent, db):
     a_played_match(agent)
     batch = agent.batch().to_json()
-    client.post("/api/agent/facts", json=batch)
+    client.post("/api/agent/facts", json=batch, headers=client.account.bearer)
     before = db.scalar("SELECT COUNT(*) FROM cash_samples")
-    second = client.post("/api/agent/facts", json=batch).json()
+    second = client.post(
+        "/api/agent/facts", json=batch, headers=client.account.bearer
+    ).json()
     assert second["duplicates"] == len(batch["facts"])
     assert db.scalar("SELECT COUNT(*) FROM cash_samples") == before
 
@@ -298,7 +332,7 @@ def test_a_client_that_is_already_current_replays_nothing(client, agent, db):
 
 
 def test_a_client_too_far_behind_is_told_to_start_again(client, agent, db, monkeypatch):
-    import profitdog.server.api.app as api
+    import profitdog_server.api.app as api
 
     monkeypatch.setattr(api, "MAX_REPLAY_EVENTS", 3)
     a_played_match(agent)

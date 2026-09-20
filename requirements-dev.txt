@@ -1,0 +1,6 @@
+# Everything needed to run the whole suite from the repository root, which
+# exercises both halves against a real PostgreSQL.
+-r agent/requirements.txt
+-r server/requirements.txt
+
+pytest

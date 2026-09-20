@@ -15,7 +15,7 @@ Usage:
 import argparse
 import time
 
-from profitdog.agent.adapters import richpresence as rp_module
+from profitdog_agent.adapters import richpresence as rp_module
 
 
 def main():

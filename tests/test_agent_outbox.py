@@ -16,8 +16,8 @@ import textwrap
 
 import pytest
 
-from profitdog.agent.outbox import Outbox
-from profitdog.protocol import Fact, FactBatch
+from profitdog_agent.outbox import Outbox
+from profitdog_protocol import Fact, FactBatch
 
 
 @pytest.fixture()
@@ -139,8 +139,9 @@ def test_a_sequence_number_is_never_reused_after_a_crash(tmp_path):
     script = textwrap.dedent(
         f"""
         import os, sys
-        sys.path.insert(0, {str(__import__("pathlib").Path(__file__).resolve().parents[1])!r})
-        from profitdog.agent.outbox import Outbox
+        for _root in {[str(__import__("pathlib").Path(__file__).resolve().parents[1] / p) for p in ("agent", "protocol")]!r}:
+            sys.path.insert(0, _root)
+        from profitdog_agent.outbox import Outbox
         box = Outbox({str(path)!r}, boot_id="crashy")
         for i in range(200):
             fact = box.append("presence", "rich_presence", {{"i": i}})

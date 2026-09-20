@@ -1,0 +1,9 @@
+# The Windows agent. Two dependencies, and one of them is really a DLL: the
+# `steamworkspy` package is used as a convenient source of `steam_api64.dll`,
+# not for its Python wrapper, which does not expose Rich Presence at all.
+#
+# Nothing here touches PostgreSQL. The agent's store is its SQLite outbox,
+# which is stdlib, because a gaming PC with no server in sight is exactly the
+# shape SQLite is best at.
+steamworkspy
+msgpack

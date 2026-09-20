@@ -22,19 +22,22 @@ is what ruleset versioning is for, and this test is what proves it works.
 
 from __future__ import annotations
 
+import uuid
+
 from pathlib import Path
 
 import pytest
 
-from profitdog.server.db import open_database
-from profitdog.server.domain import rulesets
-from profitdog.server.domain.analysis import METRICS, analyse, select_points
-from profitdog.server.domain.engine import derive_match, load_readings
-from profitdog.server.importer import import_file, match_key_for_file
+from profitdog_server.db import open_database
+from profitdog_server.domain import rulesets
+from profitdog_server.domain.analysis import METRICS, analyse, select_points
+from profitdog_server.domain.engine import derive_match, load_readings
+from profitdog_server.importer import import_file, match_key_for_file
+from .conftest import TEST_DATABASE_URL
 
 FIXTURES = (
     Path(__file__).resolve().parents[1]
-    / "profitdog-ui" / "src" / "lib" / "__fixtures__"
+    / "ui" / "src" / "lib" / "__fixtures__"
 )
 
 # life -> (kit_cost, earned, other_outflow, profit, duration, break_even)
@@ -57,21 +60,23 @@ EXPECTED = {"session-europe.csv": EUROPE, "session-kavkazi.csv": KAVKAZI}
 
 
 @pytest.fixture(scope="module")
-def imported(tmp_path_factory):
+def imported():
     """Both recorded sessions, imported once for the whole module."""
-    path = tmp_path_factory.mktemp("parity") / "profitdog.sqlite3"
-    db = open_database(path)
+    db = open_database(TEST_DATABASE_URL, schema="test_" + uuid.uuid4().hex[:16])
     reports = {}
     for name in EXPECTED:
         reports[name] = import_file(db, FIXTURES / name)
-    yield db, reports
-    db.close()
+    try:
+        yield db, reports
+    finally:
+        db.drop_schema()
+        db.close()
 
 
 def match_row(db, name: str):
     return db.query_one(
         "SELECT id, match_key, started_at, ended_at, map, faction, build, closed"
-        " FROM matches WHERE match_key = ?",
+        " FROM matches WHERE match_key = %s",
         (match_key_for_file(Path(name)),),
     )
 

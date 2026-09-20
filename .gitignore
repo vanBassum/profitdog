@@ -3,14 +3,17 @@ __pycache__/
 .pytest_cache/
 node_modules/
 build/
-dist/*.exe
+dist/
+agent/build/
+agent/dist/
 steam_appid.txt
 .claude/
 *.png
 !icons/*.png
 
-# The database, its write-ahead log, and benchmark scratch. One file holds
-# everything; back that up and you have backed up the project's history.
+# The server's database is PostgreSQL now and lives in a volume, not a file.
+# These patterns remain for the agent's outbox, which is still SQLite and is
+# sometimes pointed at the repo during development.
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
@@ -24,3 +27,6 @@ outbox.sqlite3*
 session_*.csv
 role_xp_log.csv
 *.log
+
+# Local configuration. `.env.example` is the tracked one.
+.env

@@ -10,23 +10,71 @@ totals — so a test that passes against it is testing the real ingest path.
 from __future__ import annotations
 
 import itertools
+import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import psycopg
 import pytest
 
-from profitdog.protocol import Fact, FactBatch
-from profitdog.server.db import open_database
-from profitdog.server.ingest import Ingestor
+from dataclasses import dataclass
 
-FIXTURES = Path(__file__).resolve().parents[1] / "profitdog-ui" / "src" / "lib" / "__fixtures__"
+from profitdog_protocol import Fact, FactBatch
+from profitdog_server import auth
+from profitdog_server.db import open_database, utc_now
+from profitdog_server.ingest import Ingestor
+
+FIXTURES = Path(__file__).resolve().parents[1] / "ui" / "src" / "lib" / "__fixtures__"
+
+
+#: Where the tests find PostgreSQL. There is no fallback to an in-process
+#: database, on purpose: a test suite that quietly runs against something
+#: other than the engine production uses will pass on SQL the real one
+#: rejects, which is exactly the class of bug this project just spent a port
+#: discovering.
+TEST_DATABASE_URL = os.environ.get(
+    "PROFITDOG_TEST_DATABASE_URL",
+    os.environ.get(
+        "PROFITDOG_DATABASE_URL",
+        "postgresql://profitdog:profitdog@127.0.0.1:55432/profitdog_test",
+    ),
+)
+
+
+def pytest_configure(config):
+    """Fail early and clearly when there is no database to test against."""
+    try:
+        with psycopg.connect(TEST_DATABASE_URL, connect_timeout=5) as conn:
+            conn.execute("SELECT 1")
+    except psycopg.Error as exc:
+        raise pytest.UsageError(
+            "cannot reach PostgreSQL at %s. "
+            "Start one with `docker compose up -d postgres`, or point "
+            "PROFITDOG_TEST_DATABASE_URL somewhere else. The driver said: %s"
+            % (TEST_DATABASE_URL.rsplit("@", 1)[-1], str(exc).strip())
+        ) from exc
 
 
 @pytest.fixture()
-def db(tmp_path):
-    database = open_database(tmp_path / "profitdog.sqlite3")
-    yield database
-    database.close()
+def db():
+    """A database of one's own, as a PostgreSQL schema.
+
+    A schema rather than a whole database: `CREATE DATABASE` cannot run inside
+    a transaction, takes a template lock that serialises the suite, and costs
+    far more than the isolation is worth. A schema gives every test its own
+    namespace of tables, created and dropped in milliseconds, and two tests
+    cannot see each other's rows any more than two databases could.
+    """
+    name = "test_" + uuid.uuid4().hex[:16]
+    database = open_database(TEST_DATABASE_URL, schema=name)
+    try:
+        yield database
+    finally:
+        try:
+            database.drop_schema()
+        finally:
+            database.close()
 
 
 @pytest.fixture()
@@ -126,3 +174,86 @@ class AgentSim:
 @pytest.fixture()
 def agent():
     return AgentSim()
+
+
+# ---------------------------------------------------------------------------
+# Accounts
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Account:
+    """One signed-in person, with one linked PC.
+
+    Carries both credentials a test might need: the session cookie a browser
+    would hold, and the bearer token the agent on that PC would upload with.
+    Having both on one object is what makes a cross-account test easy to write
+    honestly -- there is no way to accidentally read with the wrong one,
+    because you have to name which you are using.
+    """
+
+    user_id: int
+    email: str
+    session: str
+    agent_id: str
+    credential: str
+    sim: "AgentSim"
+
+    @property
+    def cookies(self) -> dict:
+        return {auth.SESSION_COOKIE: self.session}
+
+    @property
+    def bearer(self) -> dict:
+        return {"authorization": "Bearer " + self.credential}
+
+
+@pytest.fixture()
+def accounts(db):
+    """Make an account with a linked agent, through the real linking flow.
+
+    Deliberately not an INSERT: going through start/approve/redeem means these
+    fixtures break if the handshake breaks, and every test that uses them is
+    standing on the same path a real PC takes.
+    """
+    made: list[Account] = []
+
+    def make(email: str, *, agent_id: str | None = None, label: str | None = None):
+        index = len(made) + 1
+        agent = agent_id or ("agent-%d" % index)
+        with db.write() as conn:
+            cursor = conn.execute(
+                "INSERT INTO users (google_sub, email, created_at)"
+                " VALUES (%s, %s, %s) RETURNING id",
+                ("sub-%s" % email, email, utc_now()),
+            )
+            user_id = int(cursor.fetchone()[0])
+
+        request = auth.start_link(db, agent_id=agent, label=label or email)
+        assert auth.approve_link(db, code=request.code, user_id=user_id)
+        credential = auth.redeem_link(
+            db, code=request.code, device_secret=request.device_secret
+        )
+
+        account = Account(
+            user_id=user_id,
+            email=email,
+            session=auth.create_session(db, user_id),
+            agent_id=agent,
+            credential=credential,
+            sim=AgentSim(agent_id=agent, boot_id="boot-%d" % index),
+        )
+        made.append(account)
+        return account
+
+    return make
+
+
+@pytest.fixture()
+def alice(accounts):
+    return accounts("alice@example.com", agent_id="agent-alice")
+
+
+@pytest.fixture()
+def bob(accounts):
+    return accounts("bob@example.com", agent_id="agent-bob")
