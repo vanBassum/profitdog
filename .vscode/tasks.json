@@ -1,0 +1,59 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "server",
+      "type": "shell",
+      "command": "python -u -m profitdog.server",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "profitdog",
+        "clear": true
+      }
+    },
+    {
+      "label": "agent",
+      "type": "shell",
+      "command": "python -u -m profitdog.agent",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "profitdog",
+        "clear": true
+      }
+    },
+    {
+      "label": "vite dev",
+      "type": "shell",
+      "command": "pnpm dev",
+      "options": {
+        "cwd": "${workspaceFolder}/profitdog-ui"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "profitdog",
+        "clear": true
+      }
+    },
+    {
+      "label": "server + vite",
+      "dependsOn": ["server", "vite dev"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    }
+  ]
+}

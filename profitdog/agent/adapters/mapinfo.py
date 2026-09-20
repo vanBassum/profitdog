@@ -127,20 +127,6 @@ def _read_breadcrumbs(path):
 # not what players actually call it — confirmed via wardogshub.gg/map/: the
 # server browser and community use Ozeti/Bakurani/Zestafona, and "Europe"/
 # "Kavkazi" are just the underlying world names those correspond to (Europe
-# -> Ozeti explicitly per that source; Kavkazi -> Bakurani by matching
-# region/theme, since both describe the same Eastern-Europe mountain map).
-MAP_NAMES = {
-    "Europe": "Ozeti",
-    "Kavkazi": "Bakurani",
-}
-
-
-def display_map_name(raw):
-    """Community/server-browser name for a raw map value from current_map(),
-    or the raw value itself if there's no known alternate name."""
-    return MAP_NAMES.get(raw, raw)
-
-
 def current_map():
     """Best-effort current/most-recent map name, or None if unavailable."""
     best_ts, best_map = None, None

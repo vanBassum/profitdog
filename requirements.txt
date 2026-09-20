@@ -1,5 +1,13 @@
-matplotlib
-pandas
+# The agent needs only these two, and one of them is really a DLL: the
+# `steamworkspy` package is used as a convenient source of `steam_api64.dll`,
+# not for its Python wrapper, which does not expose Rich Presence at all.
 steamworkspy
 msgpack
-Pillow
+
+# The server. SQLite, the domain and the tests are stdlib; these are the HTTP
+# and WebSocket surface.
+fastapi
+uvicorn[standard]
+
+# Tests only.
+pytest

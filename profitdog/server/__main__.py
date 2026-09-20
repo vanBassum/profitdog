@@ -1,0 +1,56 @@
+"""Run the server: ingest, derive, serve.
+
+    python -m profitdog.server
+    python -m profitdog.server --db profitdog.sqlite3 --port 5174
+
+One process owns the database, the domain, the API and the built UI. The agent
+is a separate program, on this machine or another one; this end does not care
+which, and never reads a local game file.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+from pathlib import Path
+
+import uvicorn
+
+from .api import create_app
+from .config import Settings
+
+
+def main(argv: list[str] | None = None) -> int:
+    settings = Settings.from_env()
+    parser = argparse.ArgumentParser(prog="profitdog.server")
+    parser.add_argument("--db", default=str(settings.database))
+    parser.add_argument("--ui", default=str(settings.ui_dist))
+    parser.add_argument("--host", default=settings.host)
+    parser.add_argument("--port", type=int, default=settings.port)
+    parser.add_argument("--verbose", "-v", action="store_true")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s  %(message)s",
+    )
+
+    resolved = Settings(
+        database=Path(args.db).resolve(),
+        ui_dist=Path(args.ui).resolve(),
+        host=args.host,
+        port=args.port,
+        collector=False,
+    )
+    app = create_app(settings=resolved)
+    log = logging.getLogger("profitdog.server")
+    log.info("database %s", resolved.database)
+    log.info("ui       %s%s", resolved.ui_dist,
+             "" if resolved.ui_dist.is_dir() else "  (not built — API only)")
+    log.info("listening on http://%s:%d", resolved.host, resolved.port)
+    uvicorn.run(app, host=resolved.host, port=resolved.port, log_level="warning")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

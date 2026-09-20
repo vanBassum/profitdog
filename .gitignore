@@ -1,10 +1,26 @@
 __pycache__/
 *.pyc
+.pytest_cache/
+node_modules/
 build/
 dist/*.exe
 steam_appid.txt
-session_*.csv
-role_xp_log.csv
 .claude/
 *.png
 !icons/*.png
+
+# The database, its write-ahead log, and benchmark scratch. One file holds
+# everything; back that up and you have backed up the project's history.
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# The agent's outbox lives outside the repo by default (~/.profitdog-agent), but
+# not when someone points it here.
+outbox.sqlite3*
+
+# The CSV era. Nothing reads these any more — they were imported once, and are
+# kept only as an archive of the data before it had a database.
+session_*.csv
+role_xp_log.csv
+*.log
