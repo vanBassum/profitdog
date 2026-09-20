@@ -18,6 +18,11 @@ export default defineConfig({
       "/api": {
         target: "http://localhost:5174",
         changeOrigin: true,
+        // `/api/live` is a WebSocket. Vite only registers an upgrade handler
+        // for a proxy entry that asks for one, so without this the socket
+        // fails to connect and the dev UI silently goes back to polling
+        // snapshots — REST works, live deltas never arrive.
+        ws: true,
       },
     },
   },

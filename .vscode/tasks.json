@@ -50,10 +50,18 @@
       }
     },
     {
-      "label": "server + vite",
-      "dependsOn": ["server", "vite dev"],
+      "label": "all",
+      "dependsOn": [
+        "server",
+        "agent",
+        "vite dev"
+      ],
       "dependsOrder": "parallel",
-      "problemMatcher": []
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
     }
   ]
 }
