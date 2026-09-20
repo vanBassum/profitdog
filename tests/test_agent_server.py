@@ -17,6 +17,7 @@ no human intervention to recover.
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
 from datetime import datetime, timedelta, timezone
 
@@ -24,7 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from profitdog_agent.outbox import Outbox
-from profitdog_agent.uplink import Uplink
+from profitdog_agent.uplink import MIN_BACKOFF_SEC, Uplink
 from profitdog_server import auth
 from profitdog_server.api import create_app
 from profitdog_server.config import Settings
@@ -287,6 +288,145 @@ def test_a_restored_backup_gets_everything_the_agent_still_holds(wired, tmp_path
     # The second match arrived; the first was not duplicated by the rewind.
     assert db.scalar("SELECT COUNT(*) FROM matches") == 2
     assert db.scalar("SELECT COUNT(*) FROM cash_samples") == delivered + 3
+
+
+def test_a_replaced_database_does_not_wedge_the_agent_forever(wired):
+    """The server is rebuilt. The agent has been running the whole time.
+
+    This is the shape of a migration: the facts are gone from the server and
+    so is every envelope it recorded, while the agent's sequence numbers carry
+    on from where they were -- the early ones were acknowledged long ago and
+    deleted. Nothing can ever fill that gap.
+
+    Before the fix the cursor stayed at 0 and the agent posted the same batch
+    every couple of seconds, was told it was all duplicates, and never
+    drained. The requirement is only that it recovers on its own.
+    """
+    outbox, uplink, wire, db, _client = wired
+    a_match(outbox, START, [0, 0, -5260, 900])
+    assert attempt(uplink)
+    assert outbox.depth() == 0
+
+    # The new database: this agent's account and credential survive (it is
+    # still linked), but the ledger of what it has already sent does not --
+    # which is what the cursor is walked over.
+    with db.write() as conn:
+        conn.execute("DELETE FROM ingested_envelopes")
+        conn.execute("UPDATE agents SET acked_through = 0")
+    before = int(db.scalar("SELECT COUNT(*) FROM matches"))
+
+    a_match(outbox, START + timedelta(hours=1), [0, 0, -3000, 2500])
+    held = outbox.depth()
+    assert held > 0
+
+    posts_before = wire.posts
+    assert attempt(uplink)
+
+    assert outbox.depth() == 0, "the outbox never drained"
+    assert wire.posts - posts_before <= 2, "it resent the same batch"
+    # The play that happened after the rebuild landed, rather than being
+    # stored and then acknowledged into a cursor that never moved.
+    assert db.scalar("SELECT COUNT(*) FROM matches") == before + 1
+
+
+def test_an_old_server_that_cannot_move_its_cursor_still_unblocks_the_queue(wired):
+    """The agent's own way out, for a server that has not been fixed yet.
+
+    The released EXE meets a server whose cursor is stuck below what the agent
+    still holds. Every batch comes back acknowledged through 0, and since a
+    batch is the head of the queue, the evening's play behind it is never
+    offered at all -- which is what "I ran it and there is no profit on the
+    page" looks like from the outside.
+
+    What the server reports about the batch is the proof the cursor is not
+    giving: it accounted for every fact in it. So they are forgotten and the
+    queue moves.
+    """
+    outbox, uplink, _wire, _db, _client = wired
+    a_match(outbox, START, [0, 0, -5260, 900])
+    already_sent = max(fact.agent_seq for fact in outbox.pending(1000))
+    a_match(outbox, START + timedelta(hours=1), [0, 0, -3000, 2500])
+    sent: list[list[int]] = []
+
+    def post(path: str, payload: dict) -> dict:
+        seqs = [fact["agent_seq"] for fact in payload["facts"]]
+        sent.append(seqs)
+        # An old server: it already holds the first match, it takes the rest,
+        # and its cursor is wedged behind sequence numbers nobody has.
+        duplicates = len([seq for seq in seqs if seq <= already_sent])
+        return {
+            "acked_through": 0,
+            "accepted": len(seqs) - duplicates,
+            "duplicates": duplicates,
+            "server_seq": 0,
+        }
+
+    uplink._post = post  # noqa: SLF001 - swapping the transport is the point
+
+    assert uplink.flush_once() > 0, "nothing was forgotten, so nothing can move"
+    assert outbox.depth() == 0, "the queue is still blocked behind its own head"
+    assert len(sent) == 1
+
+
+def test_facts_the_server_did_not_account_for_are_kept(wired):
+    """The line the recovery must not cross.
+
+    A server that says it took fewer facts than it was sent has lost some of
+    them, and a cursor at 0 is then telling the truth. Forgetting the batch
+    here would lose exactly the facts it failed to store.
+    """
+    outbox, uplink, _wire, _db, _client = wired
+    a_match(outbox, START, [0, 0, -5260, 900])
+    held = outbox.depth()
+
+    def post(path: str, payload: dict) -> dict:
+        seqs = payload["facts"]
+        return {
+            "acked_through": 0,
+            "accepted": len(seqs) - 1,  # one went missing
+            "duplicates": 0,
+            "server_seq": 0,
+        }
+
+    uplink._post = post  # noqa: SLF001 - swapping the transport is the point
+
+    assert uplink.flush_once() == 0
+    assert outbox.depth() == held, "it forgot a fact the server never took"
+
+
+def test_a_server_that_acknowledges_nothing_is_not_treated_as_progress(wired):
+    """The loop's half of the same bug.
+
+    A round trip that moves nothing means the next one would send the
+    identical facts. Calling that a success reset the back-off and sent them
+    two seconds later, forever.
+    """
+    outbox, uplink, _wire, _db, _client = wired
+    a_match(outbox, START, [0, 0, -5260, 900])
+    stop = threading.Event()
+    posts = []
+
+    def post(path: str, payload: dict) -> dict:
+        posts.append(path)
+        stop.set()
+        # Stored some, lost some, acknowledged nothing: no progress is
+        # possible and none may be claimed.
+        return {
+            "acked_through": 0,
+            "accepted": len(payload["facts"]) - 1,
+            "duplicates": 0,
+            "server_seq": 0,
+        }
+
+    uplink._post = post  # noqa: SLF001 - swapping the transport is the point
+    uplink._get = lambda path: {"acked_through": 0}  # noqa: SLF001
+
+    uplink.run(stop, interval=0.01)
+
+    assert len(posts) == 1, "it kept sending against a cursor that never moved"
+    assert uplink._backoff > MIN_BACKOFF_SEC, "no back-off after a useless round trip"  # noqa: SLF001
+    assert "not acknowledging" in (uplink.status.last_error or "")
+    assert outbox.depth() > 0, "it deleted facts the server never acknowledged"
 
 
 def test_the_agent_sends_no_conclusions(wired):

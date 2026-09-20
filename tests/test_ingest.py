@@ -94,6 +94,68 @@ def test_the_cursor_only_advances_over_contiguous_facts(ingestor, db, agent):
     assert ack.acked_through == facts[-1].agent_seq
 
 
+def test_the_cursor_crosses_a_gap_the_agent_can_no_longer_fill(ingestor, db, agent):
+    """A fresh database under an agent that has been running for weeks.
+
+    The agent's first sequence is 2289 because 1-2288 were acknowledged by the
+    server this one replaced, and an acknowledged fact is deleted. Holding the
+    cursor at 0 waiting for sequence 1 waits forever: the agent resends the
+    same batch every couple of seconds, is told every time that it is all
+    duplicates, and never drains. The gap below what it still holds is written
+    off instead.
+    """
+    agent.play([0, 0, -1000, -900])
+    facts = agent.batch().facts
+    for offset, fact in enumerate(facts):
+        object.__setattr__(fact, "agent_seq", 2289 + offset)
+
+    ack = ingestor.ingest(agent.batch(facts))
+
+    assert ack.accepted == len(facts)
+    assert ack.acked_through == facts[-1].agent_seq, "wedged behind facts nobody holds"
+
+
+def test_an_agent_already_wedged_is_unwedged_by_its_next_batch(ingestor, db, agent):
+    """The state this bug leaves behind, and the recovery from it.
+
+    The facts are already stored -- they were accepted on an earlier attempt --
+    so the redelivery is all duplicates. The cursor still has to move, or the
+    agent stays in the loop it is in.
+    """
+    agent.play([0, 0, -1000, -900])
+    facts = agent.batch().facts
+    for offset, fact in enumerate(facts):
+        object.__setattr__(fact, "agent_seq", 5000 + offset)
+
+    first = ingestor.ingest(agent.batch(facts))
+    with db.write() as conn:
+        conn.execute(
+            "UPDATE agents SET acked_through = 0 WHERE agent_id = %s",
+            (agent.agent_id,),
+        )
+
+    again = ingestor.ingest(agent.batch(facts))
+
+    assert again.duplicates == len(facts)
+    assert again.accepted == 0
+    assert again.acked_through == facts[-1].agent_seq
+    assert again.acked_through == first.acked_through
+
+
+def test_a_gap_inside_a_batch_still_stops_the_cursor(ingestor, db, agent):
+    """The gap that is worth waiting for, which must not be written off.
+
+    Sequence 4 is missing from the delivery but is still in the agent's
+    outbox -- the batch reaches back past it -- so it is coming.
+    """
+    agent.play([0, 0, -1000, -900, -800, -700])
+    facts = agent.batch().facts
+
+    ack = ingestor.ingest(agent.batch([f for f in facts if f.agent_seq != 4]))
+
+    assert ack.acked_through == 3
+
+
 def test_the_cursor_survives_a_server_restart(ingestor, db, agent, tmp_path):
     agent.play([0, 0, -1000, -900])
     ack = ingestor.ingest(agent.drain())

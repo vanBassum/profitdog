@@ -13,6 +13,24 @@ database, which is the pairing worth having: the network is allowed to be
 unreliable, and the server's idempotency gate turns the resulting duplicates
 into no-ops.
 
+## When the cursor cannot move
+
+There is one state the cursor alone cannot get out of. The server is waiting
+for sequence numbers this agent no longer holds -- acknowledged by a server
+that has since been replaced, and deleted here on the strength of that
+acknowledgement -- so its cursor stays where it is no matter what arrives.
+Every batch then comes back "all duplicates, acked through 0", the head of the
+queue never clears, and because a batch is always the head, nothing behind it
+is ever offered either. Play all evening and none of it is uploaded.
+
+So a batch the server accounts for in full -- every fact either stored or
+already held -- is treated as delivered, cursor or no cursor. That is not a
+guess: the server has just said what it did with each one, and the only thing
+keeping them here was a promise about *earlier* facts that nobody can keep.
+The server's own gap-closing fix makes this rare; this makes an agent that
+meets a server without that fix recover anyway, which matters because the
+agent is an EXE on somebody's gaming PC and the server is not.
+
 ## Why it re-reads the server's cursor on failure
 
 One case does not resolve itself by retrying blindly: the server stored a batch
@@ -33,6 +51,13 @@ Failures back off exponentially to a ceiling, because the common failure is "no
 server yet" and hammering a closed port every two seconds for an evening is
 neither useful nor quiet. Success resets it immediately: a flap should cost one
 slow retry, not a slow evening.
+
+A request that succeeds and moves nothing backs off the same way. It is not a
+contradiction: the server answered, accepted the batch as duplicates it
+already had, and left its cursor where it was, so sending the same five
+hundred facts again immediately achieves exactly as much. Treating "200 OK"
+as progress is what turns a stuck cursor into a permanent upload loop, which
+is how this was found.
 """
 
 from __future__ import annotations
@@ -89,6 +114,10 @@ class Uplink:
         self.credential = credential
         self.status = UplinkStatus(acked_through=outbox.acked_through)
         self._backoff = MIN_BACKOFF_SEC
+        #: Whether the "acknowledges only 0" warning has been said already.
+        #: Against a server whose cursor is stuck it is true of every batch,
+        #: and a warning on every poll is a warning nobody reads.
+        self._warned_unacked = False
 
     # -- transport -------------------------------------------------------
 
@@ -162,6 +191,40 @@ class Uplink:
         )
         ack = Ack.from_json(self._post("/api/agent/facts", batch.to_json()))
         dropped = self.outbox.ack(ack.acked_through)
+        if dropped:
+            # A cursor that moves is a cursor that works: if it ever stops
+            # again, that is news worth hearing about once more.
+            self._warned_unacked = False
+
+        if not dropped:
+            # The cursor did not move. It cannot, if the server is waiting for
+            # sequence numbers below this batch -- numbers acknowledged by a
+            # server that has since been replaced and deleted here on the
+            # strength of that acknowledgement. Nobody has them; nobody ever
+            # will.
+            #
+            # The cursor is not the only proof of delivery. The server also
+            # reports what it did with each fact, and `accepted + duplicates`
+            # covering the whole batch means it either stored or already had
+            # every one of them. Combined with the batch being contiguous --
+            # it is the head of a queue that only ever loses an acknowledged
+            # prefix, so it has no holes -- there is nothing in this range the
+            # server is missing, and keeping it is what stops everything
+            # behind it from ever being offered.
+            seqs = [fact.agent_seq for fact in facts]
+            accounted = ack.accepted + ack.duplicates == len(facts)
+            contiguous = seqs[-1] - seqs[0] + 1 == len(seqs)
+            if accounted and contiguous:
+                dropped = self.outbox.ack(seqs[-1])
+                say = log.debug if self._warned_unacked else log.warning
+                self._warned_unacked = True
+                say(
+                    "server holds all %d facts through %d but acknowledges "
+                    "only %d; forgetting them anyway so the queue can move",
+                    len(facts),
+                    seqs[-1],
+                    ack.acked_through,
+                )
         self.status.acked_through = ack.acked_through
         self.status.pending = self.outbox.depth()
         log.debug(
@@ -195,12 +258,35 @@ class Uplink:
 
         while not stop.is_set():
             try:
-                self.drain()
+                moved = self.drain()
                 self.status.connected = True
-                self.status.last_error = None
                 self.status.last_success_at = time.time()
-                self._backoff = MIN_BACKOFF_SEC
-                wait = interval
+                held = self.outbox.depth()
+                if moved == 0 and held:
+                    # The server is up and taking the batch, but its cursor is
+                    # not moving, so nothing can be deleted and the next
+                    # attempt would send the identical facts. Back off and
+                    # re-read the cursor rather than spin.
+                    self.status.last_error = (
+                        "server is not acknowledging: %d facts held" % held
+                    )
+                    wait = self._backoff
+                    self._backoff = min(self._backoff * 2, MAX_BACKOFF_SEC)
+                    log.warning(
+                        "delivered a batch but the server acknowledged nothing "
+                        "(still at %d); %d facts held, retrying in %.0fs",
+                        self.status.acked_through,
+                        held,
+                        wait,
+                    )
+                    try:
+                        self.sync_cursor()
+                    except Exception:  # noqa: BLE001 - it answered a moment ago
+                        pass
+                else:
+                    self.status.last_error = None
+                    self._backoff = MIN_BACKOFF_SEC
+                    wait = interval
             except (urllib.error.URLError, OSError, ValueError) as exc:
                 self.status.connected = False
                 self.status.last_error = str(exc)

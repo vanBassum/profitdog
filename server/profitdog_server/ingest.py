@@ -65,6 +65,15 @@ gap in front of it is stored — the facts are good, there is no reason to throw
 them away — but acks only up to the gap, so the agent keeps retrying the
 missing part instead of dropping it. When the gap is filled by a later batch,
 the cursor jumps past both.
+
+One gap can never be filled: the one *below* the oldest sequence the agent
+still holds. The agent sends the head of its queue and deletes only what was
+acknowledged, so those numbers are gone from its disk — acked by an earlier
+server, or by this one before its database was replaced. Waiting for them
+wedges the cursor permanently, and a wedged cursor is not a quiet failure: the
+queue never drains and the agent re-uploads the same batch every couple of
+seconds for as long as it runs. So that gap is written off and the cursor
+starts from the batch's own floor.
 """
 
 from __future__ import annotations
@@ -194,13 +203,42 @@ class Ingestor:
 
     # -- the cursor ------------------------------------------------------
 
-    def _advance_cursor(self, conn, agent_ref: int, current: int) -> int:
+    def _advance_cursor(
+        self, conn, agent_ref: int, current: int, *, floor: int = 0
+    ) -> int:
         """Walk forward over contiguous sequence numbers we hold.
 
         Bounded: a very long contiguous run is acknowledged a chunk at a time,
         over successive batches, rather than in one unbounded scan. The agent
         keeps a little longer than strictly necessary, which costs it nothing.
+
+        `floor` is the lowest sequence in the batch that just arrived, and it
+        closes a gap that would otherwise wedge this cursor forever. The agent
+        sends the head of its queue and deletes only what has been
+        acknowledged, so a number below `floor` is a number it does not have
+        and will never send again -- it was acked by some earlier server, or
+        by this one before its database was replaced. Waiting for it means
+        waiting for something nobody holds: the cursor stays put, every batch
+        comes back a duplicate, the agent's queue never drains, and it
+        re-uploads the same facts every couple of seconds until someone
+        notices. So the gap below `floor` is written off, loudly, and the walk
+        starts from there.
+
+        A gap *inside* the batch is a different thing and still stops the
+        walk: those facts are still in the outbox, and they are coming.
         """
+        if floor > current + 1:
+            log.warning(
+                "agent %d: sequences %d-%d will never arrive (the agent no "
+                "longer holds them); writing the gap off and acknowledging "
+                "from %d",
+                agent_ref,
+                current + 1,
+                floor - 1,
+                floor,
+            )
+            current = floor - 1
+
         rows = conn.execute(
             "SELECT agent_seq FROM ingested_envelopes"
             " WHERE agent_ref = %s AND agent_seq > %s ORDER BY agent_seq LIMIT 50000",
@@ -297,7 +335,10 @@ class Ingestor:
                     "SELECT acked_through FROM agents WHERE id = %s", (agent_ref,)
                 ).fetchone()[0]
             )
-            acked = self._advance_cursor(conn, agent_ref, current)
+            # The head of the queue: what the agent still holds. Anything
+            # below it is gone from its disk and cannot be resent.
+            floor = min((fact.agent_seq for fact in batch.facts), default=0)
+            acked = self._advance_cursor(conn, agent_ref, current, floor=floor)
             if acked != current:
                 conn.execute(
                     "UPDATE agents SET acked_through = %s WHERE id = %s", (acked, agent_ref)
