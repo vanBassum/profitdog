@@ -20,8 +20,12 @@ Two things this has to work around:
 
 import glob
 import os
-import winreg
 from datetime import datetime, timezone
+
+try:
+    import winreg
+except ImportError:  # not Windows: tests and the server import this module too
+    winreg = None
 
 import msgpack
 
@@ -30,6 +34,8 @@ _BREADCRUMB_TS_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 
 def _steam_install_path():
+    if winreg is None:
+        return r"C:\Program Files (x86)\Steam"
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
             return winreg.QueryValueEx(key, "SteamPath")[0].replace("/", "\\")

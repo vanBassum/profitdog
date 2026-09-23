@@ -133,9 +133,11 @@ class Uplink:
         self.status = UplinkStatus(acked_through=outbox.acked_through)
         self._backoff = MIN_BACKOFF_SEC
         #: When the server last heard from us, on the monotonic clock -- so a
-        #: PC whose wall clock jumps does not skip or spam heartbeats. Zero
+        #: PC whose wall clock jumps does not skip or spam heartbeats. None
         #: means never, which is why the first tick after startup sends one.
-        self._told_server = 0.0
+        #: (Not zero: the monotonic clock starts near zero at boot, so on a
+        #: machine up for less than the interval zero would read as "just now".)
+        self._told_server: float | None = None
         #: Whether the "acknowledges only 0" warning has been said already.
         #: Against a server whose cursor is stuck it is true of every batch,
         #: and a warning on every poll is a warning nobody reads.
@@ -272,7 +274,9 @@ class Uplink:
         rather than a minute later, which is when somebody watching the page
         for their new install is looking at it.
         """
-        return time.monotonic() - self._told_server >= HEARTBEAT_INTERVAL_SEC
+        if self._told_server is None:
+            return True
+        return time.monotonic() >= self._told_server + HEARTBEAT_INTERVAL_SEC
 
     def heartbeat(self) -> None:
         """Tell the server this PC is still here, with nothing to report.
@@ -326,7 +330,7 @@ class Uplink:
                 if self.heartbeat_due():
                     # Nothing to send, or nothing sent recently enough to have
                     # kept the server's idea of this PC fresh. Either way it is
-                    # owed a sign of life. The clock starts at zero, so the
+                    # owed a sign of life. The clock starts unset, so the
                     # first pass through here is the one that announces this
                     # boot and its version.
                     self.heartbeat()
