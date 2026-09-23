@@ -60,7 +60,8 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - run: pip install -r server/requirements.txt pytest
+      # msgpack for the agent modules the tests import, as ci.yml does.
+      - run: pip install -r server/requirements.txt msgpack pytest
       - run: python -m pytest -q
 
   agent:
