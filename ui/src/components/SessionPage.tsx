@@ -27,6 +27,13 @@ interface Props {
 }
 
 const TABLE_OPEN_KEY = "profitdog:lives-table-open"
+
+/** Wardogs' team codenames, to the chart palette's faction slot. */
+const FACTION_TOKENS: Record<string, string> = {
+  alpha: "--series-lonestar",
+  bravo: "--series-valkyra",
+  charlie: "--series-manticore",
+}
 /** Enough to draw a match at full fidelity; the server decimates past it. */
 const CURVE_POINTS = 2000
 
@@ -156,8 +163,23 @@ export function SessionPage({ matchKey, backHref, live }: Props) {
     )
   }
 
+  // Wardogs names the team only once it has assigned one, so a match that has
+  // just started has no faction yet. It arrives as `match.meta`, which refetches
+  // `detail`, so the tint and the badge appear mid-match without a reload.
+  const factionToken = detail.faction ? FACTION_TOKENS[detail.faction] : undefined
+  const factionColor = `var(${factionToken ?? "--series-unknown"})`
+  const factionName = detail.faction_display ?? detail.faction
+
   return (
     <>
+      {factionToken && (
+        <div
+          aria-hidden
+          className="viz-root faction-tint"
+          style={{ "--faction": factionColor } as React.CSSProperties}
+        />
+      )}
+
       <div className="mb-3 flex flex-wrap items-center gap-3">
         {backHref && (
           <NavLink
@@ -212,6 +234,37 @@ export function SessionPage({ matchKey, backHref, live }: Props) {
           </select>
         )}
 
+        <span
+          className="viz-root flex items-center gap-2 rounded-md border px-2.5 py-1 text-xs"
+          style={
+            factionName
+              ? {
+                  borderColor: `color-mix(in oklab, ${factionColor} 55%, transparent)`,
+                  backgroundColor: `color-mix(in oklab, ${factionColor} 12%, transparent)`,
+                }
+              : undefined
+          }
+          title={
+            factionName
+              ? "The team Wardogs put you on for this match"
+              : "Wardogs has not assigned a team yet"
+          }
+        >
+          <span
+            aria-hidden
+            className="size-2.5 rounded-full"
+            style={{ backgroundColor: factionColor, opacity: factionName ? 1 : 0.4 }}
+          />
+          {factionName ? (
+            <span>
+              <span className="text-muted-foreground">Playing </span>
+              <span className="font-semibold">{factionName}</span>
+            </span>
+          ) : (
+            <span className="text-muted-foreground">Team not assigned yet</span>
+          )}
+        </span>
+
         {/* Which rules read this match. Normally invisible noise, but the
             moment a second ruleset exists it is the first thing you want to
             know when two matches disagree. */}
@@ -222,7 +275,9 @@ export function SessionPage({ matchKey, backHref, live }: Props) {
         </span>
       </div>
 
-      <section className="overflow-hidden rounded-lg border">
+      {/* Opaque, so the faction tint frames the chart rather than washing
+          through it — the marks' rings are drawn in the card's own colour. */}
+      <section className="overflow-hidden rounded-lg border bg-card">
         <SummaryBand match={detail} peak={session.peak} trough={session.trough} />
         {/* Closing the table hands its height to the chart. The upper bound
             rises with it rather than the clamp being removed: a curve
@@ -243,7 +298,7 @@ export function SessionPage({ matchKey, backHref, live }: Props) {
       </section>
 
       <LifeTable
-        className="mt-3"
+        className="mt-3 bg-card"
         annotations={annotations.lives}
         open={tableOpen}
         onOpenChange={setTableOpen}

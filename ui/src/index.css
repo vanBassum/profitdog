@@ -204,3 +204,30 @@
   --viz-adjust: #d3a63a;
   --viz-underwater: rgba(181, 72, 60, 0.07);
 }
+/* ---------------------------------------------------------------------------
+   Faction tint: the session page washes the viewport in the team you played,
+   so which side a match was on reads at a glance before any label does. The
+   hue is the chart's faction slot, so the tint and any faction mark agree;
+   the name is always printed beside it, so the colour is never the only cue.
+   --------------------------------------------------------------------------- */
+
+.faction-tint {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in oklab, var(--faction) 16%, transparent),
+    color-mix(in oklab, var(--faction) 5%, transparent) 55%
+  );
+  transition: background 300ms ease;
+}
+
+.dark .faction-tint {
+  background: linear-gradient(
+    to bottom,
+    color-mix(in oklab, var(--faction) 22%, transparent),
+    color-mix(in oklab, var(--faction) 7%, transparent) 55%
+  );
+}

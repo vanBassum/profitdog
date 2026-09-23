@@ -100,7 +100,10 @@ export function App() {
   }
 
   return (
-    <div className="min-h-svh bg-background">
+    // No background of its own: <body> already paints one, and leaving this
+    // transparent is what lets a page wash the whole viewport behind itself
+    // (the session page's faction tint).
+    <div className="min-h-svh">
       <div className="mx-auto w-full max-w-[1600px] px-[clamp(24px,2vw,32px)] pt-5 pb-4">
         <header className="mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b pb-2.5">
           <div className="flex items-center gap-5">
