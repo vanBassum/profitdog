@@ -18,6 +18,15 @@ as a running copy of Wardogs, so the session is deliberately short-lived: hold
 it only while the game is actually running (`game_running()`), and always
 release it. The context manager is the way to be sure.
 
+Releasing it, though, is not something this module can finish on its own. See
+`steamsession.py`: shutting the API down and unloading the DLL still leaves
+`steamclient64.dll` mapped with its connection to the Steam client open, and
+Steam keeps counting the process as the game until it exits. So nothing in the
+agent calls this class directly any more — the collector goes through
+`SteamSession`, which runs it in a child process whose exit is the release.
+Called directly, it is still correct for a one-shot script that exits when it
+is done.
+
 Usage:
     import richpresence
 
@@ -179,17 +188,30 @@ _DLL_CANDIDATES.append(
 # documented `python -m profitdog_agent` invocation.
 _DLL_CANDIDATES.append(os.path.join(os.getcwd(), "steam_api64.dll"))
 
-try:
-    import steamworkspy
-    _DLL_CANDIDATES.append(os.path.join(os.path.dirname(steamworkspy.__file__), "steam_api64.dll"))
-except ImportError:
-    pass
+
+def _steamworkspy_dll():
+    """Where `pip install steamworkspy` put the DLL, if it is installed.
+
+    Imported here rather than at module scope on purpose. This module is
+    imported by the agent's main process for `game_running()` alone, which
+    touches no Steam library at all, and a top-level import would pull a
+    package that exists to load Steam DLLs into the one process that must never
+    hold one. See `steamsession.py` for why that matters so much.
+    """
+    try:
+        import steamworkspy
+    except ImportError:
+        return None
+    return os.path.join(os.path.dirname(steamworkspy.__file__), "steam_api64.dll")
 
 
 def _find_dll():
     for path in _DLL_CANDIDATES:
         if os.path.exists(path):
             return path
+    fallback = _steamworkspy_dll()
+    if fallback and os.path.exists(fallback):
+        return fallback
     raise FileNotFoundError(
         "steam_api64.dll not found. Place it in the repository root, set "
         "PROFITDOG_STEAM_DLL to its path, or `pip install steamworkspy`. "

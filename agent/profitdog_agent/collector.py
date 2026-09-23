@@ -32,7 +32,7 @@ The watermark that makes it work is written in the same transaction as the fact
 (see `outbox.append`), so the two cannot disagree — and it survives restarts,
 or every restart would re-report the whole breadcrumb log as new spawns.
 
-## The Steam AppID discipline, kept exactly as it was
+## The Steam AppID discipline, and where it now lives
 
 Reading Wardogs' Rich Presence means registering with Steam *as* Wardogs, and
 Steam counts that registration as a running instance of the game. An agent that
@@ -40,6 +40,13 @@ stayed initialised all day would leave Steam convinced the game was still
 running long after you quit it — the whole reason this loop watches for the
 process on a much finer cadence than it polls. The session is claimed when the
 game appears and dropped the moment it goes.
+
+Dropping it means ending a process, not calling a function. `SteamSession` runs
+the Steamworks half in a child, because `SteamAPI_Shutdown` plus unloading the
+DLL demonstrably was not enough — Steam kept showing the game as running until
+the whole agent was closed. `adapters/steamsession.py` has the full account.
+From up here nothing changed: claim on `init()`, read every poll, `shutdown()`
+the moment the game goes.
 """
 
 from __future__ import annotations
@@ -51,6 +58,7 @@ from datetime import datetime
 
 from profitdog_protocol import utc_now
 from .adapters import mapinfo, richpresence, rolexp
+from .adapters.steamsession import SessionLost, SteamSession
 from .config import (
     GAME_WATCH_INTERVAL_SEC,
     IDLE_INTERVAL_SEC,
@@ -103,7 +111,7 @@ class Collector:
     def __init__(self, outbox: Outbox, *, interval: float = POLL_INTERVAL_SEC) -> None:
         self.outbox = outbox
         self.interval = interval
-        self._rp: richpresence.RichPresence | None = None
+        self._rp: SteamSession | None = None
         self._last_heartbeat = 0.0
 
     # -- the sources -----------------------------------------------------
@@ -234,20 +242,34 @@ class Collector:
                     continue
 
                 if self._rp is None:
-                    rp = richpresence.RichPresence()
-                    if not rp.init():
-                        detail = rp.init_error or "is Steam running?"
+                    session = SteamSession()
+                    if not session.init():
+                        detail = session.init_error or "is Steam running?"
                         log.warning("could not initialise Rich Presence: %s", detail)
                         self._status("steam_unavailable", detail)
                         if _wait(stop, IDLE_INTERVAL_SEC):
                             break
                         continue
-                    self._rp = rp
+                    self._rp = session
                     game_was_running = True
                     self._status("game_open")
                     log.info("Wardogs is running - reading its Rich Presence")
 
-                self._emit_presence(self._rp.read())
+                try:
+                    presence = self._rp.read()
+                except SessionLost as exc:
+                    # The helper died or stopped answering. Nothing is lost:
+                    # the game is still running, and the next pass claims a
+                    # fresh session. Releasing this one first is what keeps the
+                    # dead child from being the thing Steam is still counting.
+                    log.warning("lost the Steam session (%s); claiming a new one", exc)
+                    self._release()
+                    self._status("steam_unavailable", str(exc))
+                    if _wait(stop, IDLE_INTERVAL_SEC):
+                        break
+                    continue
+
+                self._emit_presence(presence)
                 self._emit_spawns()
 
                 heartbeat = time.monotonic() - self._last_heartbeat > HEARTBEAT_SEC
@@ -263,7 +285,11 @@ class Collector:
             self._release()
 
     def _release(self) -> None:
-        """Hand the AppID back. The single most important line in this file."""
+        """Hand the AppID back. The single most important line in this file.
+
+        It ends the helper process, and Steam believes that — which is more
+        than could be said for the calls it used to make.
+        """
         if self._rp is None:
             return
         self._rp.shutdown()

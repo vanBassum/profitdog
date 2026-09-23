@@ -15,19 +15,35 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
+import sys
 import threading
 
 from pathlib import Path
 
+from .adapters.steamsession import HELPER_FLAG, helper_main
 from .collector import Collector
 from .config import UPLINK_INTERVAL_SEC, AgentSettings
 from .credentials import CredentialError, CredentialStore
 from .linking import LinkingError, ensure_credential
 from .outbox import Outbox
 from .uplink import Uplink
+from .version import agent_build, agent_version
 
 
 def main() -> int:
+    # Before anything else, including argparse: this same program is what the
+    # collector re-runs to hold the Steam session, and that child must not
+    # parse flags, touch the outbox or try to link a PC. See
+    # `adapters/steamsession.py` for why the session lives in a process of its
+    # own at all.
+    if HELPER_FLAG in sys.argv[1:]:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)-7s %(name)s  %(message)s",
+            stream=sys.stderr,
+        )
+        return helper_main()
+
     settings = AgentSettings.from_env()
     parser = argparse.ArgumentParser(prog="profitdog_agent")
     parser.add_argument("--server", default=settings.server, help="Server base URL")
@@ -48,6 +64,9 @@ def main() -> int:
         help="Print the linking URL instead of opening a browser",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument(
+        "--version", action="version", version=f"profitdog agent {agent_build()}"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -55,6 +74,11 @@ def main() -> int:
         format="%(asctime)s %(levelname)-7s %(name)s  %(message)s",
     )
     log = logging.getLogger("profitdog_agent")
+
+    # First line out, before anything that can go wrong: whoever is reading a
+    # log to work out why their PC is behaving oddly needs to know which build
+    # produced it, and a build that failed to start still managed to say so.
+    log.info("profitdog agent %s", agent_build())
 
     outbox = Outbox(args.outbox)
     log.info("agent %s (boot %s)", outbox.agent_id, outbox.boot_id)
@@ -101,7 +125,11 @@ def main() -> int:
     )
 
     uplink = Uplink(
-        outbox, args.server, label=args.label, credential=credential.token
+        outbox,
+        args.server,
+        label=args.label,
+        credential=credential.token,
+        version=agent_version(),
     )
     threads = [
         threading.Thread(

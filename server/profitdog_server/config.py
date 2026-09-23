@@ -101,6 +101,20 @@ class Settings:
     #: -- so a hosted instance sends people there rather than telling them to
     #: build one, which is advice for a developer and not for a player.
     releases_url: str = "https://github.com/vanBassum/profitdog/releases/latest"
+    #: Which agent build this server considers current, so **Get the agent**
+    #: can say "1.4.0 available" rather than printing a version number and
+    #: leaving the reader to go and compare it themselves.
+    #:
+    #: Stamped into the image at build time, not fetched. The release workflow
+    #: builds the server image and the agent EXE from one tag, so the server
+    #: already knows the answer by construction -- and knowing it offline beats
+    #: asking GitHub, which is a network call that can fail, rate-limit, or be
+    #: unreachable entirely on an instance that is not allowed out.
+    #:
+    #: Empty on a checkout and on any image built without it. That is not a
+    #: failure: an unset value means the page says nothing about currency,
+    #: which is better than a wrong verdict.
+    agent_version: str = ""
 
     @property
     def auth_configured(self) -> bool:
@@ -180,4 +194,8 @@ class Settings:
                 "PROFITDOG_RELEASES_URL",
                 "https://github.com/vanBassum/profitdog/releases/latest",
             ).strip(),
+            # Not PROFITDOG_VERSION: that name already belongs to the agent,
+            # which reads it to override its own build number for testing. Two
+            # processes started from one shell would otherwise fight over it.
+            agent_version=os.environ.get("PROFITDOG_AGENT_VERSION", "").strip(),
         )

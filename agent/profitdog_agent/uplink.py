@@ -45,6 +45,20 @@ server from a backup is the same case in reverse: the cursor comes back
 acknowledged number, everything the backup lost is still in the outbox waiting
 to be sent again.
 
+## Saying so when there is nothing to say
+
+An agent with an empty outbox used to make no requests at all, which meant the
+server could not tell it apart from one that had been switched off: both last
+spoke when the last match ended. So every `HEARTBEAT_INTERVAL_SEC` the agent
+sends a batch with no facts in it.
+
+It is an ordinary batch through the ordinary endpoint, so there is nothing new
+that can break: the server updates what it knows about this PC -- last seen,
+label, version, boot -- ingests zero facts, and answers with its cursor as
+usual. The first one goes out at startup rather than a minute in, because a
+build that has just started is exactly when "which version is that PC on?" has
+a new answer.
+
 ## Back-off
 
 Failures back off exponentially to a ceiling, because the common failure is "no
@@ -70,7 +84,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from profitdog_protocol import Ack, FactBatch
+from profitdog_protocol import HEARTBEAT_INTERVAL_SEC, Ack, FactBatch
 from .outbox import Outbox
 
 log = logging.getLogger("profitdog_agent.uplink")
@@ -103,17 +117,25 @@ class Uplink:
         timeout: float = 15.0,
         label: str | None = None,
         credential: str | None = None,
+        version: str | None = None,
     ) -> None:
         self.outbox = outbox
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.label = label
+        #: This build's version, sent with every batch so the server can say
+        #: what each PC is running without anyone going to look.
+        self.version = version
         #: What this PC uploads with. Sent on every call; the server decides
         #: whose account the facts land in from this and never from the agent
         #: id in the batch, so a wrong one is refused rather than misfiled.
         self.credential = credential
         self.status = UplinkStatus(acked_through=outbox.acked_through)
         self._backoff = MIN_BACKOFF_SEC
+        #: When the server last heard from us, on the monotonic clock -- so a
+        #: PC whose wall clock jumps does not skip or spam heartbeats. Zero
+        #: means never, which is why the first tick after startup sends one.
+        self._told_server = 0.0
         #: Whether the "acknowledges only 0" warning has been said already.
         #: Against a server whose cursor is stuck it is true of every batch,
         #: and a warning on every poll is a warning nobody reads.
@@ -188,8 +210,14 @@ class Uplink:
             boot_id=self.outbox.boot_id,
             facts=facts,
             label=self.label,
+            version=self.version,
         )
         ack = Ack.from_json(self._post("/api/agent/facts", batch.to_json()))
+        # Only a POST leaves a mark. It is what updates `last_seen_at`, while
+        # reading the cursor is invisible to everyone but us, so this is what
+        # postpones the next heartbeat -- a busy agent has already said
+        # everything a heartbeat would.
+        self._told_server = time.monotonic()
         dropped = self.outbox.ack(ack.acked_through)
         if dropped:
             # A cursor that moves is a cursor that works: if it ever stops
@@ -236,6 +264,40 @@ class Uplink:
         )
         return dropped
 
+    def heartbeat_due(self) -> bool:
+        """Whether the server is owed a sign of life.
+
+        Starts true, and stays true until something is actually posted: a
+        freshly started agent announces its boot and its build straight away
+        rather than a minute later, which is when somebody watching the page
+        for their new install is looking at it.
+        """
+        return time.monotonic() - self._told_server >= HEARTBEAT_INTERVAL_SEC
+
+    def heartbeat(self) -> None:
+        """Tell the server this PC is still here, with nothing to report.
+
+        A batch with no facts in it. Ingest treats that as what it is -- an
+        agent saying hello -- and updates last seen, label, version and boot
+        without writing an envelope, so this costs a row update and cannot
+        disturb anything derived.
+        """
+        batch = FactBatch(
+            agent_id=self.outbox.agent_id,
+            boot_id=self.outbox.boot_id,
+            facts=[],
+            label=self.label,
+            version=self.version,
+        )
+        ack = Ack.from_json(self._post("/api/agent/facts", batch.to_json()))
+        self._told_server = time.monotonic()
+        # The answer carries the cursor, so an idle agent keeps its outbox in
+        # step with the server for free.
+        if ack.acked_through > self.outbox.acked_through:
+            self.outbox.ack(ack.acked_through)
+        self.status.acked_through = ack.acked_through
+        log.debug("heartbeat: still here, acked through %d", ack.acked_through)
+
     def drain(self) -> int:
         """Send until the outbox is empty or a batch fails. Returns facts sent."""
         total = 0
@@ -258,10 +320,23 @@ class Uplink:
 
         while not stop.is_set():
             try:
+                spoke_at = self._told_server
                 moved = self.drain()
-                self.status.connected = True
-                self.status.last_success_at = time.time()
                 held = self.outbox.depth()
+                if self.heartbeat_due():
+                    # Nothing to send, or nothing sent recently enough to have
+                    # kept the server's idea of this PC fresh. Either way it is
+                    # owed a sign of life. The clock starts at zero, so the
+                    # first pass through here is the one that announces this
+                    # boot and its version.
+                    self.heartbeat()
+                if self._told_server != spoke_at:
+                    # Claim a connection only when something actually crossed
+                    # the wire. A drain with an empty outbox makes no request,
+                    # and reporting "connected" on the strength of it is how a
+                    # dead server went unnoticed for a whole evening.
+                    self.status.connected = True
+                    self.status.last_success_at = time.time()
                 if moved == 0 and held:
                     # The server is up and taking the batch, but its cursor is
                     # not moving, so nothing can be deleted and the next

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import html
 
+from .. import agents as _agents
+
 _STYLE = """
   :root { color-scheme: light dark; --fg:#111; --bg:#fafafa; --card:#fff;
           --muted:#666; --line:#e4e4e7; --accent:#2563eb; }
@@ -47,6 +49,23 @@ _STYLE = """
                      color:var(--fg); font:inherit; margin-bottom:12px; }
   ol { margin:0 0 16px; padding-left:20px; color:var(--muted); }
   li { margin-bottom:7px; }
+  .pcs { margin:20px 0 0; padding:14px 0 0; border-top:1px solid var(--line); }
+  .pcs h2 { margin:0 0 10px; font-size:13px; font-weight:600;
+            text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .pc { display:flex; justify-content:space-between; gap:12px;
+        align-items:baseline; margin-bottom:6px; font-size:13px; }
+  .pc .ver { font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+             color:var(--muted); }
+  .pc .name { display:flex; align-items:center; gap:7px; min-width:0; }
+  .pc .name span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dot { flex:none; width:7px; height:7px; border-radius:50%;
+         background:var(--muted); opacity:.45; }
+  .dot.on { background:#16a34a; opacity:1; }
+  .pc .when { color:var(--muted); font-size:12px; }
+  .pc .right { text-align:right; flex:none; }
+  .upd { display:block; font-size:12px; color:var(--accent);
+         text-decoration:none; }
+  .upd:hover { text-decoration:underline; }
 """
 
 
@@ -140,7 +159,74 @@ def link_prompt_page(*, error: str | None = None) -> str:
     )
 
 
-def download_page(*, available: bool, releases_url: str) -> str:
+def _linked_pcs(agents, releases_url: str = "") -> str:
+    """The PCs reporting, whether each is running, and which build it is on.
+
+    This is the page people are on when they ask "am I up to date?" and "why
+    have my matches stopped?", and until now the only way to answer either was
+    to walk over to the machine and read its console.
+
+    Three things are said about each PC, and each of them can be "don't know"
+    without the row falling apart:
+
+    - **Running or not**, from the heartbeat the agent sends every minute even
+      with nothing to report. A PC that has never been heard from says so.
+    - **Which build**, from what it last reported. An agent too old to report a
+      version says "version unknown", which is true where a number would not
+      be.
+    - **Whether that build is current**, but only when this server was told
+      which build is current. Otherwise the version stands on its own, because
+      a verdict nobody can support is worse than no verdict.
+    """
+    if not agents:
+        return ""
+    releases = html.escape(releases_url or "", quote=True)
+    rows = []
+    for agent in agents:
+        name = agent.label or agent.agent_id or "this PC"
+        live = " on" if agent.online else ""
+        if agent.online:
+            when = "running"
+        elif agent.silent_for is None:
+            when = "never reported"
+        else:
+            when = "last seen " + _agents.since_text(agent.silent_for)
+        version = (
+            html.escape(str(agent.version)) if agent.version else "version unknown"
+        )
+        # Only an out-of-date build gets a second line, and only when there is
+        # somewhere to send the reader. Everything else is already answered by
+        # the version sitting next to it.
+        update = ""
+        if agent.version_state == "outdated" and agent.current_version:
+            offer = "Update to " + html.escape(str(agent.current_version))
+            if releases:
+                update = (
+                    "<a class=\"upd\" href=\"" + releases + "\" target=\"_blank\" "
+                    "rel=\"noreferrer noopener\">" + offer + "</a>"
+                )
+            else:
+                # A server with no releases URL still knows a newer build
+                # exists. Naming it without a link beats saying nothing.
+                update = "<span class=\"upd\">" + offer + "</span>"
+        rows.append(
+            "<div class=\"pc\">"
+            "<span class=\"name\">"
+            "<span class=\"dot" + live + "\" aria-hidden=\"true\"></span>"
+            "<span>" + html.escape(str(name)) + "</span></span>"
+            "<span class=\"right\"><span class=\"ver\">" + version + "</span>"
+            "<span class=\"when\"> &middot; " + when + "</span>" + update +
+            "</span></div>"
+        )
+    return (
+        "<div class=\"pcs\"><h2>Your PCs</h2>" + "".join(rows) +
+        "<p class=\"muted\" style=\"margin:10px 0 0\">A running agent checks in "
+        "about once a minute, whether or not you are playing.</p></div>"
+    )
+
+
+def download_page(*, available: bool, releases_url: str,
+                  agents=None) -> str:
     """The setup page: where the agent comes from, and what to do with it.
 
     Two ways to get the same program. A server that has a build beside it
@@ -151,6 +237,7 @@ def download_page(*, available: bool, releases_url: str) -> str:
     that appears out of a server you happen to be signed in to.
     """
     releases = html.escape(releases_url or "", quote=True)
+    pcs = _linked_pcs(agents, releases_url)
     steps = (
         "<ol>"
         "<li>Download the agent and run it on the PC you play on.</li>"
@@ -176,7 +263,7 @@ def download_page(*, available: bool, releases_url: str) -> str:
                 "<p class=\"muted\" style=\"margin-top:16px\">Grab "
                 "<code>profitdog.exe</code> from the latest release. The same "
                 "build works for everyone; it belongs to your account only "
-                "once you approve it.</p>"
+                "once you approve it.</p>" + pcs
             )
         else:
             body += (
@@ -185,7 +272,7 @@ def download_page(*, available: bool, releases_url: str) -> str:
                 "agent.spec</code>, or point "
                 "<code>PROFITDOG_AGENT_EXE</code> or "
                 "<code>PROFITDOG_RELEASES_URL</code> at one.</p>"
-                + have_code
+                + have_code + pcs
             )
         return _page("Download the agent", body)
 
@@ -205,5 +292,5 @@ def download_page(*, available: bool, releases_url: str) -> str:
         + have_code +
         "<p class=\"muted\" style=\"margin-top:16px\">The same build works for "
         "everyone; it belongs to your account only once you approve it.</p>"
-        + release_link,
+        + release_link + pcs,
     )

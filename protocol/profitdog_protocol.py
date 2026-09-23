@@ -67,6 +67,31 @@ from typing import Any, Literal
 
 PROTOCOL_VERSION = 1
 
+#: How often an agent with nothing to send says so anyway.
+#:
+#: An idle agent makes no requests at all: `flush_once` returns early on an
+#: empty outbox, and reading the cursor changes nothing server-side. So a PC
+#: that has been watching happily for six hours and one that was switched off
+#: six hours ago look identical from the server -- both last spoke when the
+#: last match ended. "Is my agent running?" was unanswerable, which is the one
+#: question somebody asks when their matches stop appearing.
+#:
+#: The heartbeat is a batch with no facts in it. That is deliberate: it needs
+#: no new endpoint, no new envelope and no new failure mode, and it carries the
+#: label, version and boot id that ingest already knows what to do with. A
+#: fresh agent therefore reports its build immediately rather than only once
+#: somebody plays.
+HEARTBEAT_INTERVAL_SEC = 60
+
+#: How long the server waits before calling a PC offline.
+#:
+#: Three heartbeats, not one. A missed request is the normal cost of a laptop
+#: lid, a sleeping Wi-Fi radio or a server restart, and a status that flickers
+#: to "offline" on every one of them is a status nobody trusts. Both halves
+#: read these two numbers from here, because a threshold shorter than the
+#: interval it is measuring would mark every healthy agent dead.
+OFFLINE_AFTER_SEC = HEARTBEAT_INTERVAL_SEC * 3
+
 #: What an envelope can be. Each is a raw observation; none is a conclusion.
 FactKind = Literal[
     # A single Rich Presence poll: game_state, profit_loss, faction as read.
@@ -151,6 +176,11 @@ class FactBatch:
     protocol: int = PROTOCOL_VERSION
     #: Free-form, for the operator's benefit only — never used for identity.
     label: str | None = None
+    #: Which build of the agent sent this. Reporting only, like `label`: the
+    #: server stores the latest one so "which version is that PC on?" can be
+    #: answered from the account rather than by walking over to the machine.
+    #: Absent from an older agent, which is why nothing may depend on it.
+    version: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -158,6 +188,7 @@ class FactBatch:
             "agent_id": self.agent_id,
             "boot_id": self.boot_id,
             "label": self.label,
+            "version": self.version,
             "facts": [f.to_json() for f in self.facts],
         }
 
@@ -181,6 +212,7 @@ class FactBatch:
             facts=facts,
             protocol=protocol,
             label=raw.get("label"),
+            version=raw.get("version"),
         )
 
 
@@ -245,6 +277,8 @@ def dumps(payload: dict[str, Any]) -> str:
 
 __all__ = [
     "PROTOCOL_VERSION",
+    "HEARTBEAT_INTERVAL_SEC",
+    "OFFLINE_AFTER_SEC",
     "FACT_KINDS",
     "Fact",
     "FactBatch",

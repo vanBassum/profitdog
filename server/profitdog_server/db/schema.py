@@ -364,6 +364,17 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        2,
+        """
+        -- Which build of the agent last reported from this PC.
+        --
+        -- Reporting only. Nothing derives from it and nothing may: an agent
+        -- old enough not to send one leaves it NULL, and a NULL here has to
+        -- keep meaning "it did not say", not "it is out of date".
+        ALTER TABLE agents ADD COLUMN agent_version TEXT;
+        """,
+    ),
 ]
 
 

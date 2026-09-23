@@ -342,6 +342,32 @@ export function liveUrl(since: number | null): string {
 // Endpoints
 // ---------------------------------------------------------------------------
 
+/**
+ * One linked gaming PC, as the server judges it.
+ *
+ * `online` and `version_state` are verdicts, not raw data, and they are
+ * deliberately the server's to make. The timestamps were written by the
+ * server's clock, so deciding "is it running?" here would fold the viewer's
+ * clock skew into the answer — a laptop an hour out would see every agent as
+ * either dead or immortal.
+ */
+export interface AgentStatus {
+  agent_id: string
+  label: string | null
+  version: string | null
+  last_seen_at: string | null
+  online: boolean
+  /** Seconds since the server last heard from it, or null if it never has. */
+  silent_for: number | null
+  version_state: "current" | "outdated" | "dev" | "unknown"
+  current_version: string | null
+}
+
+export interface AgentsResponse {
+  agents: AgentStatus[]
+  current_version: string | null
+}
+
 /** Filters travel as a query string, spelled the way the server reads them. */
 export function filterQuery(params: Record<string, string | null | undefined>): string {
   const query = new URLSearchParams()
@@ -354,6 +380,7 @@ export function filterQuery(params: Record<string, string | null | undefined>): 
 
 export const api = {
   health: (signal?: AbortSignal) => get<Health>("/api/health", signal),
+  agents: (signal?: AbortSignal) => get<AgentsResponse>("/api/agents", signal),
   matches: (query: string, signal?: AbortSignal) =>
     get<MatchesResponse>(`/api/matches${query}`, signal),
   match: (key: string, signal?: AbortSignal) =>

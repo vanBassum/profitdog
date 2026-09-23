@@ -102,6 +102,27 @@ ways it actually breaks — server not up, outage mid-match, lost acknowledgemen
 server restored from a backup — and asserts that none of them loses or
 duplicates a fact.
 
+### Saying so when there is nothing to say
+
+An idle agent used to make no requests at all — an empty outbox sends no batch,
+and reading the cursor changes nothing server-side — so a PC watching happily
+for six hours and one switched off six hours ago produced identical rows. "Is
+my agent running?" was unanswerable, which is the one question somebody asks
+when their matches stop appearing.
+
+So every minute the agent sends a batch with no facts in it. It goes to the
+same endpoint, through the same credential, and carries the same label, version
+and boot id, so there is no new envelope and no new failure mode: ingest moves
+`last_seen_at`, stores zero facts and answers with the cursor as usual. The
+first one goes out at startup rather than a minute in, so a PC that is switched
+on and never played still reports its build.
+
+The server calls a PC offline after three missed heartbeats, not one. A dropped
+request is the ordinary cost of a laptop lid or a server restart, and a status
+that flickers on every one of them is a status nobody trusts. Both numbers live
+in `protocol/`, because a threshold shorter than the interval it measures would
+mark every healthy agent dead.
+
 ### Three timestamps, never collapsed
 
 - `source_ts` — when the source says it happened. The breadcrumb log timestamps
@@ -213,6 +234,7 @@ a real match.
 | `PROFITDOG_COOKIE_SECURE` | `0` only for a local http:// server; a Secure cookie is never sent over http |
 | `PROFITDOG_AGENT_EXE` | the build served at `/download` |
 | `PROFITDOG_RELEASES_URL` | where `/download` sends people when the server carries no build; defaults to this repo's latest GitHub release |
+| `PROFITDOG_AGENT_VERSION` | which agent build this server considers current, stamped in at image build time. Unset means it says nothing about currency |
 
 Register `{PROFITDOG_PUBLIC_URL}/auth/callback` as the authorized redirect URI
 in the Google Cloud console.
@@ -278,8 +300,25 @@ roots, no install step.
 
 `cd agent && python -m PyInstaller agent.spec` builds `agent/dist/profitdog.exe`
 — the agent, frozen, for a machine with no Python on it. CI does this on a
-Windows runner for every tag and attaches it to the release; see
-`.github/workflows/release.yml`.
+Windows runner for every tag and attaches it to the release as
+`profitdog-<version>.exe`; see `.github/workflows/release.yml`.
+
+The version is in three places, because the question "which build is that PC
+running?" gets asked in three ways. It is in the release filename, since the
+file outlives the page it came from. It is the agent's first log line and its
+`--version`. And it travels with every batch, so **Get the agent** lists each
+linked PC with the build it last reported. A checkout says `0.0.0+dev` until
+the release workflow stamps a tag into `agent/profitdog_agent/version.py`.
+
+The server is stamped from the same tag, into `PROFITDOG_AGENT_VERSION`, which
+is how **Get the agent** can say *Update to 1.4.0* rather than printing a number
+and leaving the reader to go and compare it. It is a build argument rather than
+a call to the GitHub API because the two halves are released together, so the
+answer is known at build time — and knowing it offline beats a network call that
+can fail, rate-limit, or be forbidden on an instance that is not allowed out. An
+image built without it says nothing about currency, which is the right answer
+for a server that genuinely does not know. A `0.0.0+dev` agent is never called
+out of date: it is not behind the release, it is beside it.
 
 ## The API
 
@@ -293,7 +332,7 @@ the domain racing the first one over the network.
 | `GET /api/agent/cursor` | *(agent)* where the server is for this agent, so it can resume |
 | `POST /api/agent/link/start` | *(open)* ask for a linking code |
 | `POST /api/agent/link/poll` | *(open)* wait for approval, then collect the credential once |
-| `GET /api/agents` | which agents have reported, and when |
+| `GET /api/agents` | which agents have reported, when, whether each is still running, and on which build |
 | `GET /api/health` | schema version, rulesets, sequence, counts, cache stats |
 | `GET /api/matches` | match summaries, period totals, what is available to filter by |
 | `GET /api/matches/{key}` | one match: lives, ledger, adjustments, kit marks |
@@ -402,7 +441,12 @@ predecessor's, to the dollar, on the same two recorded sessions.
   something does.
 - Reading Rich Presence means registering with Steam *as* Wardogs, so the agent
   claims the AppID only while the game is running and drops it the moment the
-  process goes — otherwise Steam goes on believing you are still playing.
+  process goes — otherwise Steam goes on believing you are still playing. The
+  claim is held by a child process, because ending it is the only release Steam
+  believes: shutting the API down and unloading `steam_api64.dll` leaves
+  `steamclient64.dll` mapped with its connection to the Steam client open, and
+  the game stays "Running" until the agent itself is closed. See
+  `agent/profitdog_agent/adapters/steamsession.py`.
 
 ## Credits
 

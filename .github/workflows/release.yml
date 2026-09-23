@@ -3,7 +3,11 @@
 #     git tag v0.3.0 && git push origin v0.3.0
 #
 # Produces `ghcr.io/vanbassum/profitdog-server:v0.3.0` (and `:latest`) and a
-# GitHub release carrying `profitdog.exe`.
+# GitHub release carrying `profitdog-0.3.0.exe` — the version is in the
+# filename because the file outlives the page it was downloaded from, and a
+# folder of identically named `profitdog.exe` copies answers no question about
+# which one is running. The same number is stamped into the build, so the
+# agent says it on startup and reports it to the server.
 #
 # The agent is built on a Windows runner because it has to be: it is frozen
 # with PyInstaller against a Windows DLL and loads Steamworks through ctypes.
@@ -76,6 +80,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r agent/requirements.txt pyinstaller
 
+      - name: Stamp the version
+        id: version
+        shell: pwsh
+        # The tag, minus its leading v, written into the module the agent reads
+        # at startup. A checkout says `0.0.0+dev` and keeps saying it until a
+        # release build passes through here, which is the point: only a tagged
+        # build may claim a version.
+        run: |
+          $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
+          $version = $tag -replace '^v', ''
+          $file = 'agent/profitdog_agent/version.py'
+          $text = Get-Content $file -Raw
+          $stamped = $text -replace '__version__ = "0\.0\.0\+dev"', "__version__ = `"$version`""
+          if ($stamped -eq $text) { throw "could not stamp the version into $file" }
+          $text = $stamped
+          $stamped = $text -replace '__commit__ = "unknown"', "__commit__ = `"$env:GITHUB_SHA`""
+          if ($stamped -eq $text) { throw "could not stamp the commit into $file" }
+          Set-Content -Path $file -Value $stamped -Encoding utf8 -NoNewline
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "agent version $version ($env:GITHUB_SHA)"
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+
       - name: Build
         working-directory: agent
         # steam_api64.dll is checked in beside the spec, so the build needs
@@ -100,10 +127,30 @@ jobs:
             throw "agent raised on startup"
           }
 
+      - name: Check it knows its own version
+        working-directory: agent
+        shell: pwsh
+        # The stamp is a text substitution in a file PyInstaller then freezes,
+        # and a substitution that silently stopped matching would ship a
+        # release calling itself 0.0.0+dev. Cheaper to fail the build here.
+        run: |
+          $said = (& dist/profitdog.exe --version) -join ' '
+          Write-Host $said
+          if ($said -notmatch [regex]::Escape('${{ steps.version.outputs.version }}')) {
+            throw "the agent reports '$said', not ${{ steps.version.outputs.version }}"
+          }
+
+      - name: Put the version in the filename
+        working-directory: agent
+        shell: pwsh
+        # Last, so the spec, the build and both checks above keep talking about
+        # one filename, and only the artifact people download carries a number.
+        run: Rename-Item dist/profitdog.exe "profitdog-${{ steps.version.outputs.version }}.exe"
+
       - uses: actions/upload-artifact@v4
         with:
           name: profitdog-agent
-          path: agent/dist/profitdog.exe
+          path: agent/dist/profitdog-${{ steps.version.outputs.version }}.exe
           if-no-files-found: error
 
   image:
@@ -131,11 +178,22 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
 
+      - name: The version this image ships with
+        id: version
+        # The same substitution the agent job makes, for the same tag. The two
+        # halves are released together, so the server can be told which agent
+        # build is current instead of asking GitHub at runtime.
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: server/Dockerfile
           push: true
+          build-args: |
+            PROFITDOG_AGENT_VERSION=${{ steps.version.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -153,11 +211,14 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: profitdog.exe
+          files: profitdog-*.exe
           generate_release_notes: true
           body: |
-            Download `profitdog.exe`, run it on the PC you play on, and approve
-            the code it shows. The same build works for everyone — it belongs
-            to no account until you link it.
+            Download the `profitdog-*.exe` below, run it on the PC you play on,
+            and approve the code it shows. The same build works for everyone —
+            it belongs to no account until you link it.
+
+            The version is in the filename, in the agent's first log line, and
+            on your **Get the agent** page once that PC has reported in.
 
             Server image: `ghcr.io/${{ env.IMAGE }}:${{ github.event.inputs.tag || github.ref_name }}`

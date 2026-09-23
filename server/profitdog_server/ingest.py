@@ -160,21 +160,22 @@ class Ingestor:
     # -- agent bookkeeping ----------------------------------------------
 
     def _agent_ref(self, conn, agent_id: str, label: str | None, now: str,
-                   user_id: int | None = None) -> int:
+                   user_id: int | None = None, version: str | None = None) -> int:
         row = conn.execute(
             "SELECT id FROM agents WHERE agent_id = %s", (agent_id,)
         ).fetchone()
         if row is not None:
             conn.execute(
-                "UPDATE agents SET last_seen_at = %s, label = COALESCE(%s, label)"
-                " WHERE id = %s",
-                (now, label, row[0]),
+                "UPDATE agents SET last_seen_at = %s, label = COALESCE(%s, label),"
+                " agent_version = COALESCE(%s, agent_version) WHERE id = %s",
+                (now, label, version, row[0]),
             )
             return int(row[0])
         cursor = conn.execute(
-            "INSERT INTO agents (agent_id, label, first_seen_at, last_seen_at,"
-            " acked_through, user_id) VALUES (%s, %s, %s, %s, 0, %s) RETURNING id",
-            (agent_id, label, now, now, user_id),
+            "INSERT INTO agents (agent_id, label, agent_version, first_seen_at,"
+            " last_seen_at, acked_through, user_id)"
+            " VALUES (%s, %s, %s, %s, %s, 0, %s) RETURNING id",
+            (agent_id, label, version, now, now, user_id),
         )
         new_id = int(cursor.fetchone()[0])
         log.info("first contact from agent %s (%s)", agent_id, label or "unlabelled")
@@ -284,14 +285,18 @@ class Ingestor:
             if identity is not None:
                 agent_ref = identity.agent_ref
                 user_id: int | None = identity.user_id
+                # COALESCE both ways round: an agent that does not report a
+                # version must not blank out the one an earlier, newer build
+                # already recorded for the same PC.
                 conn.execute(
-                    "UPDATE agents SET last_seen_at = %s, label = COALESCE(%s, label)"
-                    " WHERE id = %s",
-                    (received_at, batch.label, agent_ref),
+                    "UPDATE agents SET last_seen_at = %s, label = COALESCE(%s, label),"
+                    " agent_version = COALESCE(%s, agent_version) WHERE id = %s",
+                    (received_at, batch.label, batch.version, agent_ref),
                 )
             else:
                 agent_ref = self._agent_ref(
-                    conn, batch.agent_id, batch.label, received_at
+                    conn, batch.agent_id, batch.label, received_at,
+                    version=batch.version,
                 )
                 owner = conn.execute(
                     "SELECT user_id FROM agents WHERE id = %s", (agent_ref,)

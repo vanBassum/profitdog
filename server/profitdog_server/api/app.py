@@ -63,6 +63,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
+from .. import agents as agent_status
 from .. import auth
 from ..config import (
     DEFAULT_CHART_POINTS,
@@ -383,13 +384,31 @@ def create_app(db: Database | None = None, settings: Settings | None = None) -> 
 
     @app.get("/api/agents")
     async def agents(request: Request) -> dict:
+        """Which PCs have reported, when, and on which build.
+
+        The liveness verdict is computed here rather than in the browser. The
+        timestamps were written by this machine's clock, so comparing them
+        against a viewer's clock would fold their skew into the answer -- and a
+        laptop an hour out would see every agent as either dead or immortal.
+        """
         user = require_user(request)
         rows = database.query(
-            "SELECT agent_id, label, first_seen_at, last_seen_at, last_boot_id,"
-            " acked_through FROM agents WHERE user_id = %s ORDER BY last_seen_at DESC",
+            "SELECT agent_id, label, agent_version, first_seen_at, last_seen_at,"
+            " last_boot_id, acked_through FROM agents WHERE user_id = %s"
+            " ORDER BY last_seen_at DESC",
             (user.id,),
         )
-        return {"agents": [dict(r) for r in rows]}
+        judged = agent_status.describe_all(
+            rows, current_version=settings.agent_version or None
+        )
+        # The stored row and the verdict, together: the row still carries
+        # `first_seen_at`, `last_boot_id` and the cursor, which nothing on the
+        # page needs but anything looking at an odd agent does.
+        by_id = {status.agent_id: status.to_json() for status in judged}
+        return {
+            "agents": [dict(r) | by_id.get(str(r["agent_id"]), {}) for r in rows],
+            "current_version": settings.agent_version or None,
+        }
 
     # -- snapshots -------------------------------------------------------
 
@@ -903,12 +922,25 @@ def create_app(db: Database | None = None, settings: Settings | None = None) -> 
 
     @app.get("/download")
     async def download_view(request: Request) -> Response:
-        if viewer(request) is None:
+        who = viewer(request)
+        if who is None:
             return RedirectResponse("/login?next=%2Fdownload", status_code=303)
+        # Which PCs are already reporting, and on which build. This is the page
+        # somebody is looking at when they wonder whether their agent is the
+        # one in the release, so the answer belongs here rather than only in a
+        # console on the other machine.
+        linked = database.query(
+            "SELECT agent_id, label, agent_version, last_seen_at FROM agents"
+            " WHERE user_id = %s ORDER BY last_seen_at DESC",
+            (who.id,),
+        )
         return HTMLResponse(
             pages.download_page(
                 available=Path(settings.agent_exe).is_file(),
                 releases_url=settings.releases_url,
+                agents=agent_status.describe_all(
+                    linked, current_version=settings.agent_version or None
+                ),
             )
         )
 

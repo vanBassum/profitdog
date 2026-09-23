@@ -23,6 +23,15 @@ RUN pnpm build
 # --- the server ------------------------------------------------------------
 FROM python:3.13-slim AS server
 
+# Which agent build this image was released alongside, so "Get the agent" can
+# say "Update to 1.4.0" instead of printing a number and leaving the reader to
+# compare it. The workflow builds this image and the EXE from one tag, so the
+# answer is known at build time and needs no call to GitHub at runtime. Unset
+# on a local build, which makes the page say nothing about currency rather
+# than something wrong.
+ARG PROFITDOG_AGENT_VERSION=""
+ENV PROFITDOG_AGENT_VERSION=$PROFITDOG_AGENT_VERSION
+
 # PYTHONUNBUFFERED so container logs appear as they happen rather than when a
 # buffer fills, which for a service that logs one line a minute is never.
 ENV PYTHONUNBUFFERED=1 \

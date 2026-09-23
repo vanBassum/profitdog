@@ -157,16 +157,18 @@ class AgentSim:
 
     # -- delivery --------------------------------------------------------
 
-    def batch(self, facts: list[Fact] | None = None, label: str | None = None) -> FactBatch:
+    def batch(self, facts: list[Fact] | None = None, label: str | None = None,
+              version: str | None = None) -> FactBatch:
         return FactBatch(
             agent_id=self.agent_id,
             boot_id=self.boot_id,
             facts=list(self.facts if facts is None else facts),
             label=label,
+            version=version,
         )
 
-    def drain(self) -> FactBatch:
-        batch = self.batch()
+    def drain(self, **kwargs) -> FactBatch:
+        batch = self.batch(**kwargs)
         self.facts = []
         return batch
 
